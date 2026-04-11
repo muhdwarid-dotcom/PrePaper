@@ -1094,7 +1094,7 @@ def choose_winner_across_scenarios(best_a1: Dict[str, Any], best_c0: Dict[str, A
 
     return best_a1 if score(best_a1) >= score(best_c0) else best_c0
           
-def choose_winner_across_candidates(best_list: list[Dict[str, Any]]) -> Dict[str, Any]:
+def choose_winner_across_candidates(best_list: list[Dict[str, Any]], *, pair_label: str) -> Dict[str, Any]:
     """
     Robust winner selection (hard constraints + maximize profit).
 
@@ -1133,13 +1133,11 @@ def choose_winner_across_candidates(best_list: list[Dict[str, Any]]) -> Dict[str
 
     if not eligible:
         print("\n" + "=" * 100)
-        print(
-            "[WINNER][GATE] NO TRADE THIS WEEK — no candidate met winner constraints "
-            f"(min_trades={WIN_MIN_TRADES}, min_pf={WIN_MIN_PROFIT_FACTOR}, "
-            f"max_abs_dd_usdt={WIN_MAX_ABS_DD_USDT}, require_pos_net={WIN_REQUIRE_POSITIVE_NET})."
-        )
+        print(f"[WINNER][GATE] {pair_label}: NO TRADE THIS WEEK — no candidate met winner constraints "
+              f"(min_trades={WIN_MIN_TRADES}, min_pf={WIN_MIN_PROFIT_FACTOR}, "
+              f"max_abs_dd_usdt={WIN_MAX_ABS_DD_USDT}, require_pos_net={WIN_REQUIRE_POSITIVE_NET}).")
         print("=" * 100)
-        return
+        return None
 
     # If constraints pass: maximize net_profit (primary), then profit_over_maxdd, then PF, then win_rate.
     def score_profit_first(x: Dict[str, Any]) -> tuple:
@@ -1643,12 +1641,8 @@ def main():
                 ]
 
             # Winner across candidates (same scoring as your choose_winner_across_scenarios)
-            try:
-                winner = choose_winner_across_candidates(best_per_candidate)
-            except RuntimeError as e:
-                print("\n" + "=" * 100)
-                print(f"[GATE] {pair}: NO TRADE THIS WEEK — {e}")
-                print("=" * 100)
+            winner = choose_winner_across_candidates(best_per_candidate, pair_label=pair_label)
+            if not winner:
                 return
             win_scenario = str(winner["scenario"]).strip().upper()
             win_params = params_by_scen[win_scenario]
