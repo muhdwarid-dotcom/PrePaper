@@ -405,7 +405,7 @@ def eval_candidate_robustness_over_train(
             (events_all["event_time"] >= w0) & (events_all["event_time"] < w1)
         ].reset_index(drop=True)
 
-        trades_df, eq_df = run_portfolio_sim(
+        trades_df, eq_df, sim_counts = run_portfolio_sim(
             mode="baseline",  # robustness uses one mode consistently
             pair=pair,
             scenario=scenario,
@@ -437,6 +437,9 @@ def eval_candidate_robustness_over_train(
         s["slice_end"] = w1
         s["events_in_slice"] = int(len(ev))
         s["trades_in_slice"] = int(len(trades_df))
+        s["opens_in_slice"] = int(sim_counts["opens_count"])
+        s["closes_in_slice"] = int(sim_counts["closes_count"])
+        s["open_positions_end"] = int(sim_counts["open_positions_end"])
 
         rows.append(s)
 
@@ -578,7 +581,7 @@ def _parse_possibility(possibility: str) -> dict:
 
 def get_exit_params_from_finalist(f: Dict[str, Any]) -> tuple[float, float, int]:
     """
-    candidate_exit_params.json finalist schema:
+    candidate_for_TRADE.json finalist schema:
       finalist["exit_params"] = {"k": ..., "t": ..., "x_bars": ...}
     """
     exitp = f.get("exit_params", {}) or {}
@@ -782,7 +785,7 @@ def run_portfolio_sim(
 
     window = ohlcv[(ohlcv["time"] >= trade_start) & (ohlcv["time"] <= trade_end)].copy()
     if window.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), {"opens_count": 0, "closes_count": 0, "open_positions_end": 0}
 
     current_capital = float(initial_capital)
     positions: Dict[str, Position] = {}
@@ -790,6 +793,8 @@ def run_portfolio_sim(
     equity_rows: List[Dict[str, Any]] = []
 
     next_id = 1
+    opens_count = 0
+    closes_count = 0
 
     for _, bar in window.iterrows():
         ts = bar["time"]
@@ -820,6 +825,7 @@ def run_portfolio_sim(
                 exit_price = max(o, stop_level)
                 tr = close_position(pos, ts, exit_price, "STOP", trade_size)
                 trades.append(tr)
+                closes_count += 1
 
                 current_capital += float(tr["net_pnl_usdt"])
                 del positions[pid]
@@ -887,6 +893,7 @@ def run_portfolio_sim(
                     base_id=posid, is_pyramid=False, pyr_level=0
                 )
                 positions[posid] = pos
+                opens_count += 1
 
                 open_cnt = len(positions)
                 avail = max_avail_slots(current_capital, trade_size)
@@ -990,6 +997,7 @@ def run_portfolio_sim(
                     base_id=base.pid, is_pyramid=True, pyr_level=level
                 )
                 positions[posid] = pos
+                opens_count += 1
                 base.pyr_adds_done += 1
 
                 open_cnt = len(positions)
@@ -1010,8 +1018,13 @@ def run_portfolio_sim(
         })
 
     # 4) end-of-window forced closes (optional)
-    
-    return pd.DataFrame(trades), pd.DataFrame(equity_rows)
+    open_positions_end = len(positions)
+    sim_counts = {
+        "opens_count": opens_count,
+        "closes_count": closes_count,
+        "open_positions_end": open_positions_end,
+    }
+    return pd.DataFrame(trades), pd.DataFrame(equity_rows), sim_counts
 
 
 def summarize_trades(trades_df: pd.DataFrame, label: str) -> Dict[str, Any]:
@@ -1081,7 +1094,7 @@ def choose_winner_across_scenarios(best_a1: Dict[str, Any], best_c0: Dict[str, A
 
     return best_a1 if score(best_a1) >= score(best_c0) else best_c0
           
-def choose_winner_across_candidates(best_list: list[Dict[str, Any]]) -> Dict[str, Any]:
+def choose_winner_across_candidates(best_list: list[Dict[str, Any]], *, pair_label: str) -> Dict[str, Any]:
     """
     Robust winner selection (hard constraints + maximize profit).
 
@@ -1120,13 +1133,11 @@ def choose_winner_across_candidates(best_list: list[Dict[str, Any]]) -> Dict[str
 
     if not eligible:
         print("\n" + "=" * 100)
-        print(
-            "[WINNER][GATE] NO TRADE THIS WEEK — no candidate met winner constraints "
-            f"(min_trades={WIN_MIN_TRADES}, min_pf={WIN_MIN_PROFIT_FACTOR}, "
-            f"max_abs_dd_usdt={WIN_MAX_ABS_DD_USDT}, require_pos_net={WIN_REQUIRE_POSITIVE_NET})."
-        )
+        print(f"[WINNER][GATE] {pair_label}: NO TRADE THIS WEEK — no candidate met winner constraints "
+              f"(min_trades={WIN_MIN_TRADES}, min_pf={WIN_MIN_PROFIT_FACTOR}, "
+              f"max_abs_dd_usdt={WIN_MAX_ABS_DD_USDT}, require_pos_net={WIN_REQUIRE_POSITIVE_NET}).")
         print("=" * 100)
-        return
+        return None
 
     # If constraints pass: maximize net_profit (primary), then profit_over_maxdd, then PF, then win_rate.
     def score_profit_first(x: Dict[str, Any]) -> tuple:
@@ -1191,7 +1202,7 @@ def run_one_scenario_both_modes(
     print(events.head(10).to_string(index=False))
     print(f"[DEBUG] TOTAL EVENTS USED: {len(events)}")
     
-    trades_base, eq_base = run_portfolio_sim(
+    trades_base, eq_base, _ = run_portfolio_sim(
         mode="baseline",
         pair=pair,
         scenario=scenario,
@@ -1207,7 +1218,7 @@ def run_one_scenario_both_modes(
         trade_size=trade_size,
     )
 
-    trades_barr, eq_barr = run_portfolio_sim(
+    trades_barr, eq_barr, _ = run_portfolio_sim(
         mode="barrier",
         pair=pair,
         scenario=scenario,
@@ -1381,18 +1392,18 @@ def main():
         x_c0 = int(input("C0 x_bars (barrier activation bars): ").strip())
     else:
         # v30-driven candidates (non-interactive):
-        # - Loads finalists from candidate_exit_params.json
+        # - Loads finalists from candidate_for_TRADE.json
         # - Picks a candidate via env var CANDIDATE, otherwise defaults to rank #1 (finalists[0])
         # - Uses the k/t/x_bars determined by the quantile selection code (already stored in JSON)
         import json, os
 
-        CANDIDATE_EXIT_PARAMS_JSON = os.getenv("CANDIDATE_EXIT_PARAMS_JSON", "candidate_exit_params.json")
-        with open(CANDIDATE_EXIT_PARAMS_JSON, "r", encoding="utf-8") as f:
+        CANDIDATE_TRADE_JSON = os.getenv("CANDIDATE_TRADE_JSON", "candidate_for_TRADE.json")
+        with open(CANDIDATE_TRADE_JSON, "r", encoding="utf-8") as f:
             d = json.load(f)
 
         finalists = d.get("finalists", [])
         if not finalists:
-            raise ValueError(f"No finalists found in {CANDIDATE_EXIT_PARAMS_JSON}")
+            raise ValueError(f"No finalists found in {CANDIDATE_TRADE_JSON}")
         
         AUTO_TOP_N = int(os.getenv("AUTO_TOP_N", "3"))  # cycle top N finalists in AUTO_CYCLE
 
@@ -1428,9 +1439,9 @@ def main():
     print(f"[PORT] initial=${initial_capital:,.2f} | trade_size=${trade_size:,.2f} | maxAvail starts at {int(initial_capital // trade_size)}")
     print("=" * 100)
 
-    warmup_start = trade_start - pd.Timedelta(days=WARMUP_DAYS)
+    warmup_start = train_start - pd.Timedelta(days=WARMUP_DAYS)
     fetch_end = trade_end + (pd.Timedelta(days=7) if run_mode == "AUTO_CYCLE" else pd.Timedelta(days=0))
-    print(f"[FETCH] {pair} {INTERVAL} (warmup included): {warmup_start} -> {fetch_end}")
+    print(f"[FETCH] {pair} {INTERVAL} (TRAIN warmup included): {warmup_start} -> {fetch_end}")
 
     ohlcv = get_ohlcv_binance(pair, warmup_start, fetch_end)
     if ohlcv.empty:
@@ -1468,13 +1479,13 @@ def main():
         if run_mode == "AUTO_CYCLE":
 
             # v30 finalists (self-contained load for AUTO_CYCLE)
-            CANDIDATE_EXIT_PARAMS_JSON = os.getenv("CANDIDATE_EXIT_PARAMS_JSON", "candidate_exit_params.json")
-            with open(CANDIDATE_EXIT_PARAMS_JSON, "r", encoding="utf-8") as f:
+            CANDIDATE_TRADE_JSON = os.getenv("CANDIDATE_TRADE_JSON", "candidate_for_TRADE.json")
+            with open(CANDIDATE_TRADE_JSON, "r", encoding="utf-8") as f:
                 cand_data = json.load(f)
 
             finalists = cand_data.get("finalists", [])
             if not finalists:
-                raise ValueError(f"No finalists found in {CANDIDATE_EXIT_PARAMS_JSON}")
+                raise ValueError(f"No finalists found in {CANDIDATE_TRADE_JSON}")
 
             AUTO_TOP_N = int(os.getenv("AUTO_TOP_N", "3"))
             cycle = finalists[:AUTO_TOP_N]  # ranked order from json (top N)
@@ -1516,8 +1527,8 @@ def main():
             
             # -----------------------------
             # ROBUSTNESS (TRAIN walk-forward on finalists)
-            # Primary gate R1: >=3/4 positive weeks
-            # Secondary gate R2: worst-week net_profit > -X
+            # Gate R1b: all weeks net_profit >= ROBUST_WEEK_NET_MIN
+            # Gate R2: worst-week net_profit > ROBUST_WORST_WEEK_NET_MIN
             # Ranking: median profit_over_maxdd, tie-break median net_profit
             # -----------------------------
             print(f"[DEBUG] ROBUST_ENABLE={ROBUST_ENABLE!r}")
@@ -1530,8 +1541,8 @@ def main():
                 print("\n" + "=" * 100)
                 print("ROBUSTNESS CHECK (TRAIN weekly slices on finalists)")
                 print("=" * 100)
-                print(f"R1: pos_weeks>={ROBUST_MIN_POS_WEEKS}/{len(train_slices)} | "
-                      f"R2 gate: worst_week_net_profit>{ROBUST_WORST_WEEK_NET_MIN}")
+                print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks | "
+                      f"R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): applied after R1b")
                 for (w0, w1) in train_slices:
                     print(f"  - {w0} -> {w1}")
 
@@ -1573,22 +1584,24 @@ def main():
 
                     print("\n" + "-" * 100)
                     print(f"[ROBUST] {scen} | k={k0} t={t0} x={x0}")
-                    print(f"  R1 pos_weeks: {rob['pos_weeks']}/{rob['n_slices']} (need >= {ROBUST_MIN_POS_WEEKS})")
-                    print(f"  R2 worst_week_net_profit: {rob['worst_week_net_profit']:.2f} (need > {ROBUST_WORST_WEEK_NET_MIN})")
+                    print(f"  R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): {rob['pos_weeks']}/{rob['n_slices']} weeks pass (need all {rob['n_slices']})")
+                    print(f"  R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): {rob['worst_week_net_profit']:.2f}")
                     print(f"     median_profit_over_maxdd: {rob['median_profit_over_maxdd']:.4f}")
                     print(f"     median_net_profit: {rob['median_net_profit']:.2f}")
                     
                     dfw = rob["df_slices"]
                     if dfw is not None and not dfw.empty:
-                        print(f"  R1b threshold: net_profit >= {ROBUST_WEEK_NET_MIN:.2f} (must pass 4/4)")
                         for _, row in dfw.iterrows():
                             w0 = row["slice_start"]
                             w1 = row["slice_end"]
-                            ntr = int(row.get("trades_in_slice", 0))
+                            nev = int(row.get("events_in_slice", 0))
+                            nop = int(row.get("opens_in_slice", 0))
+                            ncl = int(row.get("closes_in_slice", 0))
+                            nopen_end = int(row.get("open_positions_end", 0))
                             net = float(row.get("net_profit", 0.0))
                             r1p = "PASS" if bool(row.get("r1_week_pass", False)) else "FAIL"
                             r2p = "PASS" if bool(row.get("r2_week_pass", False)) else "FAIL"
-                            print(f"   - W{int(row['slice_ix'])} {w0} -> {w1} | trades={ntr:3d} | net={net:+10.2f} | R1b_week={r1p} | R2_week={r2p}")
+                            print(f"   - W{int(row['slice_ix'])} {w0} -> {w1} | events={nev:3d} | opens={nop:3d} | closes={ncl:3d} | open_end={nopen_end:2d} | net={net:+10.2f} | R1b_week={r1p} | R2_week={r2p}")
 
                 # Apply gates (ROBUST)                
                 gated = [
@@ -1600,8 +1613,8 @@ def main():
                 if not gated:
                     print("\n" + "=" * 100)
                     print(f"[ROBUST][GATE] {pair_label}: NO TRADE THIS WEEK — no finalist passed TRAIN robustness gates (R1b 4/4 + R2).")
-                    print(f"R1b: each week net_profit >= {ROBUST_WEEK_NET_MIN:.2f}")
-                    print(f"R2 : worst_week_net_profit > {ROBUST_WORST_WEEK_NET_MIN:.2f}")
+                    print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks to pass")
+                    print(f"R2  (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): worst week net must exceed threshold")
                     print("=" * 100)
                     return
 
@@ -1628,12 +1641,8 @@ def main():
                 ]
 
             # Winner across candidates (same scoring as your choose_winner_across_scenarios)
-            try:
-                winner = choose_winner_across_candidates(best_per_candidate)
-            except RuntimeError as e:
-                print("\n" + "=" * 100)
-                print(f"[GATE] {pair}: NO TRADE THIS WEEK — {e}")
-                print("=" * 100)
+            winner = choose_winner_across_candidates(best_per_candidate, pair_label=pair_label)
+            if not winner:
                 return
             win_scenario = str(winner["scenario"]).strip().upper()
             win_params = params_by_scen[win_scenario]
