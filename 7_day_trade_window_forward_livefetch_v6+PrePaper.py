@@ -1357,7 +1357,9 @@ def get_exit_params_from_finalist(f: Dict[str, Any]) -> tuple[float, float, int]
 def main():
     pair = input("Pair (e.g. ACTUSDT): ").strip().upper()
     pair_label = pair
-    run_mode = input("Mode (MANUAL / AUTO_CYCLE): ").strip().upper() or "MANUAL"
+    run_mode_raw = input("Mode (MANUAL / AUTO_CYCLE): ")
+    run_mode = (run_mode_raw or "").strip().upper().replace("-", "_") or "MANUAL"
+    print(f"[DEBUG] run_mode_raw={run_mode_raw!r}  run_mode={run_mode!r}", flush=True)
 
     # -----------------------------
     # Schedule anchor: PrePaper start (Rule A)
@@ -1405,28 +1407,29 @@ def main():
         if not finalists:
             raise ValueError(f"No finalists found in {CANDIDATE_TRADE_JSON}")
         
-        AUTO_TOP_N = int(os.getenv("AUTO_TOP_N", "3"))  # cycle top N finalists in AUTO_CYCLE
+        if run_mode != "AUTO_CYCLE":
+            AUTO_TOP_N = int(os.getenv("AUTO_TOP_N", "3"))  # cycle top N finalists in AUTO_CYCLE
 
-        allowed = [f["possibility"] for f in finalists]
-        requested = os.getenv("CANDIDATE", "").strip()
+            allowed = [f["possibility"] for f in finalists]
+            requested = os.getenv("CANDIDATE", "").strip()
 
-        if requested:
-            match = next((f for f in finalists if f["possibility"] == requested), None)
-            if match is None:
-                raise ValueError(f"Invalid CANDIDATE='{requested}'. Allowed: {allowed}")
-            chosen = match
-        else:
-            chosen = finalists[0]  # default: best-ranked finalist
+            if requested:
+                match = next((f for f in finalists if f["possibility"] == requested), None)
+                if match is None:
+                    raise ValueError(f"Invalid CANDIDATE='{requested}'. Allowed: {allowed}")
+                chosen = match
+            else:
+                chosen = finalists[0]  # default: best-ranked finalist
 
-        scenario = chosen["possibility"]  # keep variable name 'scenario' so the rest of v6 still works
-        k = float(chosen["exit_params"]["k"])
-        t = float(chosen["exit_params"]["t"])
-        x_bars = int(chosen["exit_params"]["x_bars"])
+            scenario = chosen["possibility"]  # keep variable name 'scenario' so the rest of v6 still works
+            k = float(chosen["exit_params"]["k"])
+            t = float(chosen["exit_params"]["t"])
+            x_bars = int(chosen["exit_params"]["x_bars"])
 
-        print(f"Scenario (candidate possibility): {scenario}")
-        print(f"k (ATR-mult for fixed stop): {k}")
-        print(f"t (ATR-mult for trailing dist): {t}")
-        print(f"x_bars (barrier activation bars): {x_bars}")
+            print(f"Scenario (candidate possibility): {scenario}")
+            print(f"k (ATR-mult for fixed stop): {k}")
+            print(f"t (ATR-mult for trailing dist): {t}")
+            print(f"x_bars (barrier activation bars): {x_bars}")
 
     initial_capital = DEFAULT_INITIAL_CAPITAL
     trade_size = DEFAULT_TRADE_SIZE
@@ -1476,268 +1479,269 @@ def main():
         d["dmp_15m"] = np.nan
         d["dmn_15m"] = np.nan
 
-        if run_mode == "AUTO_CYCLE":
+    if run_mode == "AUTO_CYCLE":
 
-            # v30 finalists (self-contained load for AUTO_CYCLE)
-            CANDIDATE_TRADE_JSON = os.getenv("CANDIDATE_TRADE_JSON", "candidate_for_TRADE.json")
-            with open(CANDIDATE_TRADE_JSON, "r", encoding="utf-8") as f:
-                cand_data = json.load(f)
+        # v30 finalists (self-contained load for AUTO_CYCLE)
+        CANDIDATE_TRADE_JSON = os.getenv("CANDIDATE_TRADE_JSON", "candidate_for_TRADE.json")
+        with open(CANDIDATE_TRADE_JSON, "r", encoding="utf-8") as f:
+            cand_data = json.load(f)
 
-            finalists = cand_data.get("finalists", [])
-            if not finalists:
-                raise ValueError(f"No finalists found in {CANDIDATE_TRADE_JSON}")
+        finalists = cand_data.get("finalists", [])
+        if not finalists:
+            raise ValueError(f"No finalists found in {CANDIDATE_TRADE_JSON}")
 
-            AUTO_TOP_N = int(os.getenv("AUTO_TOP_N", "3"))
-            cycle = finalists[:AUTO_TOP_N]  # ranked order from json (top N)
+        AUTO_TOP_N = int(os.getenv("AUTO_TOP_N", "3"))
+        cycle = finalists[:AUTO_TOP_N]  # ranked order from json (top N)
+        print(f"[AUTO_CYCLE] AUTO_TOP_N={AUTO_TOP_N} | finalists={len(finalists)} | cycle_scenarios={[f['possibility'] for f in cycle]}", flush=True)
 
-            # -----------------------------
-            # TRADE WINDOW: run v30 finalists (C_* possibilities)
-            # -----------------------------
-            all_results = []
-            all_summary_rows = []
-            best_per_candidate = []
-            params_by_scen = {str(f["possibility"]).strip().upper(): f for f in cycle}
+        # -----------------------------
+        # TRADE WINDOW: run v30 finalists (C_* possibilities)
+        # -----------------------------
+        all_results = []
+        all_summary_rows = []
+        best_per_candidate = []
+        params_by_scen = {str(f["possibility"]).strip().upper(): f for f in cycle}
 
-            for f in cycle:
-                scen = str(f["possibility"]).strip().upper()
-                fk, ft, fx = get_exit_params_from_finalist(f)
+        for f in cycle:
+            scen = str(f["possibility"]).strip().upper()
+            fk, ft, fx = get_exit_params_from_finalist(f)
 
-                print("\n" + "-" * 100)
-                print(f"[AUTO_CYCLE] Running finalist: {scen} | k={fk} t={ft} x_bars={fx}")
+            print("\n" + "-" * 100)
+            print(f"[AUTO_CYCLE] Running finalist: {scen} | k={fk} t={ft} x_bars={fx}")
 
-                res = run_one_scenario_both_modes(
-                    pair=pair, scenario=scen,
-                    trade_start=trade_start, trade_end=trade_end,
-                    ohlcv=ohlcv, d_features=d,
-                    k=fk, t=ft, x_bars=fx,
-                    initial_capital=initial_capital, trade_size=trade_size
-                )
-
-                all_results.append(res)
-                all_summary_rows.append(res["summary_baseline"])
-                all_summary_rows.append(res["summary_barrier"])
-                best_per_candidate.append(res["best"])
-
-            summary_trade = pd.DataFrame(all_summary_rows)
-
-            print("\n" + "=" * 100)
-            print("ALL CANDIDATES SUMMARY (TRADE WINDOW)")
-            print("=" * 100)
-            print(summary_trade.to_string(index=False))
-            
-            # -----------------------------
-            # ROBUSTNESS (TRAIN walk-forward on finalists)
-            # Gate R1b: all weeks net_profit >= ROBUST_WEEK_NET_MIN
-            # Gate R2: worst-week net_profit > ROBUST_WORST_WEEK_NET_MIN
-            # Ranking: median profit_over_maxdd, tie-break median net_profit
-            # -----------------------------
-            print(f"[DEBUG] ROBUST_ENABLE={ROBUST_ENABLE!r}")
-            if ROBUST_ENABLE:
-                print("[DEBUG] entered ROBUST block")
-                train_slices = iter_monday_week_slices(train_start, trade_start)
-                if len(train_slices) > ROBUST_TRAIN_SLICES:
-                    train_slices = train_slices[-ROBUST_TRAIN_SLICES:]
-
-                print("\n" + "=" * 100)
-                print("ROBUSTNESS CHECK (TRAIN weekly slices on finalists)")
-                print("=" * 100)
-                print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks | "
-                      f"R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): applied after R1b")
-                for (w0, w1) in train_slices:
-                    print(f"  - {w0} -> {w1}")
-
-                robust_rows = []
-
-                # Build full-range events per scenario ONCE (so events_all is in-scope here)
-                events_all_by_scen: dict[str, pd.DataFrame] = {}
-                for cand in best_per_candidate:
-                    scen = str(cand["scenario"]).strip().upper()
-                    if scen not in events_all_by_scen:
-                        events_all_by_scen[scen] = build_events_all_for_robustness(
-                            d_features=d,
-                            train_start=train_start,
-                            trade_end=trade_end,
-                            scenario=scen,
-                        )
-
-                for cand in best_per_candidate:
-                    scen = str(cand["scenario"]).strip().upper()
-                    exitp = (params_by_scen[scen].get("exit_params", {}) or {})
-                    k0 = float(exitp["k"])
-                    t0 = float(exitp["t"])
-                    x0 = int(exitp["x_bars"])
-
-                    rob = eval_candidate_robustness_over_train(
-                        pair=pair,
-                        scenario=scen,
-                        ohlcv=ohlcv,
-                        d_features=d,
-                        events_all=events_all_by_scen[scen],  # <<< key fix
-                        slices=train_slices,
-                        k=k0,
-                        t=t0,
-                        x_bars=x0,
-                        initial_capital=initial_capital,
-                        trade_size=trade_size,
-                    )
-                    robust_rows.append(rob)
-
-                    print("\n" + "-" * 100)
-                    print(f"[ROBUST] {scen} | k={k0} t={t0} x={x0}")
-                    print(f"  R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): {rob['pos_weeks']}/{rob['n_slices']} weeks pass (need all {rob['n_slices']})")
-                    print(f"  R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): {rob['worst_week_net_profit']:.2f}")
-                    print(f"     median_profit_over_maxdd: {rob['median_profit_over_maxdd']:.4f}")
-                    print(f"     median_net_profit: {rob['median_net_profit']:.2f}")
-                    
-                    dfw = rob["df_slices"]
-                    if dfw is not None and not dfw.empty:
-                        for _, row in dfw.iterrows():
-                            w0 = row["slice_start"]
-                            w1 = row["slice_end"]
-                            nev = int(row.get("events_in_slice", 0))
-                            nop = int(row.get("opens_in_slice", 0))
-                            ncl = int(row.get("closes_in_slice", 0))
-                            nopen_end = int(row.get("open_positions_end", 0))
-                            net = float(row.get("net_profit", 0.0))
-                            r1p = "PASS" if bool(row.get("r1_week_pass", False)) else "FAIL"
-                            r2p = "PASS" if bool(row.get("r2_week_pass", False)) else "FAIL"
-                            print(f"   - W{int(row['slice_ix'])} {w0} -> {w1} | events={nev:3d} | opens={nop:3d} | closes={ncl:3d} | open_end={nopen_end:2d} | net={net:+10.2f} | R1b_week={r1p} | R2_week={r2p}")
-
-                # Apply gates (ROBUST)                
-                gated = [
-                    r for r in robust_rows
-                    if bool(r.get("all_weeks_pass", False))  # R1b: 4/4 weeks net >= ROBUST_WEEK_NET_MIN
-                    and (float(r["worst_week_net_profit"]) > float(ROBUST_WORST_WEEK_NET_MIN))  # R2
-                ]
-
-                if not gated:
-                    print("\n" + "=" * 100)
-                    print(f"[ROBUST][GATE] {pair_label}: NO TRADE THIS WEEK — no finalist passed TRAIN robustness gates (R1b 4/4 + R2).")
-                    print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks to pass")
-                    print(f"R2  (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): worst week net must exceed threshold")
-                    print("=" * 100)
-                    return
-
-                gated_sorted = sorted(
-                    gated,
-                    key=lambda r: (float(r["median_profit_over_maxdd"]), float(r["median_net_profit"])),
-                    reverse=True,
-                )
-                robust_pick = gated_sorted[0]
-
-                print("\n" + "=" * 100)
-                print("ROBUST WINNER (TRAIN walk-forward)")
-                print("=" * 100)
-                print(f"scenario={robust_pick['scenario']}")
-                print(f"median_profit_over_maxdd={robust_pick['median_profit_over_maxdd']:.4f}")
-                print(f"median_net_profit={robust_pick['median_net_profit']:.2f}")
-                print(f"pos_weeks={robust_pick['pos_weeks']}/{robust_pick['n_slices']}")
-                print(f"worst_week_net_profit={robust_pick['worst_week_net_profit']:.2f}")
-
-                # Restrict finalists to robust scenario only before Trade-window final selection
-                best_per_candidate = [
-                    x for x in best_per_candidate
-                    if str(x["scenario"]).strip().upper() == str(robust_pick["scenario"]).strip().upper()
-                ]
-
-            # Winner across candidates (same scoring as your choose_winner_across_scenarios)
-            winner = choose_winner_across_candidates(best_per_candidate, pair_label=pair_label)
-            if not winner:
-                return
-            win_scenario = str(winner["scenario"]).strip().upper()
-            win_params = params_by_scen[win_scenario]
-            exitp = win_params.get("exit_params", {}) or {}
-            win_k = float(exitp["k"])
-            win_t = float(exitp["t"])
-            win_x = int(exitp["x_bars"])
-
-            print("\n" + "=" * 100)
-            print("WINNER (BEST-OF PER CANDIDATE)")
-            print("=" * 100)
-
-            print(f"scenario           : {winner.get('scenario')}")
-            print(f"label              : {winner.get('label')}")
-            print(f"trades             : {winner.get('trades')}")
-            print(f"net_profit         : {winner.get('net_profit')}")
-            print(f"win_rate           : {winner.get('win_rate')}")
-            print(f"profit_factor      : {winner.get('profit_factor')}")
-            print(f"avg_pnl            : {winner.get('avg_pnl')}")
-            print(f"max_dd_pct         : {winner.get('max_dd_pct')}")
-            print(f"max_dd_usdt        : {winner.get('max_dd_usdt')}")
-            print(f"profit_over_maxdd  : {winner.get('profit_over_maxdd')}")
-            
-            # --- save trade window workbook ---
-            ident = f"{trade_start.strftime('%Y-%m-%d_%H%M')}_to_{trade_end.strftime('%Y-%m-%d_%H%M')}"
-            out_trade = os.path.join(OUT_DIR, f"forwardtest_TRADEWINDOW_7d_ALLCANDS_{ident}_{pair}.xlsx")
-            with pd.ExcelWriter(out_trade, engine="openpyxl") as w:
-                summary_trade.to_excel(w, sheet_name="summary_all_candidates", index=False)
-
-            print(f"\nSaved: {out_trade}")
-            
-            # -----------------------------
-            # PREPAPER (winner only): user-provided Monday 08:00 UTC for 7 days
-            # -----------------------------
-            
-            print("\n" + "=" * 100)
-                        
-            # -----------------------------
-            # PREPAPER (winner only): reuse same fetched ohlcv + features
-            # -----------------------------
-            print("\n" + "=" * 100)
-            print(f"PREPAPER WINDOW (UTC): {pre_start} -> {pre_end} | Pair={pair} | Scenario={win_scenario}")
-            print("=" * 100)
-
-            res_pre = run_one_scenario_both_modes(
-                pair=pair,
-                scenario=win_scenario,
-                trade_start=pre_start,
-                trade_end=pre_end,
-                ohlcv=ohlcv,
-                d_features=d,
-                k=win_k,
-                t=win_t,
-                x_bars=win_x,
-                initial_capital=initial_capital,
-                trade_size=trade_size,
+            res = run_one_scenario_both_modes(
+                pair=pair, scenario=scen,
+                trade_start=trade_start, trade_end=trade_end,
+                ohlcv=ohlcv, d_features=d,
+                k=fk, t=ft, x_bars=fx,
+                initial_capital=initial_capital, trade_size=trade_size
             )
 
-            summary_pre = pd.DataFrame([res_pre["summary_baseline"], res_pre["summary_barrier"]])
+            all_results.append(res)
+            all_summary_rows.append(res["summary_baseline"])
+            all_summary_rows.append(res["summary_barrier"])
+            best_per_candidate.append(res["best"])
+
+        summary_trade = pd.DataFrame(all_summary_rows)
+
+        print("\n" + "=" * 100)
+        print("ALL CANDIDATES SUMMARY (TRADE WINDOW)")
+        print("=" * 100)
+        print(summary_trade.to_string(index=False))
+            
+        # -----------------------------
+        # ROBUSTNESS (TRAIN walk-forward on finalists)
+        # Gate R1b: all weeks net_profit >= ROBUST_WEEK_NET_MIN
+        # Gate R2: worst-week net_profit > ROBUST_WORST_WEEK_NET_MIN
+        # Ranking: median profit_over_maxdd, tie-break median net_profit
+        # -----------------------------
+        print(f"[DEBUG] ROBUST_ENABLE={ROBUST_ENABLE!r}")
+        if ROBUST_ENABLE:
+            print("[DEBUG] entered ROBUST block")
+            train_slices = iter_monday_week_slices(train_start, trade_start)
+            if len(train_slices) > ROBUST_TRAIN_SLICES:
+                train_slices = train_slices[-ROBUST_TRAIN_SLICES:]
 
             print("\n" + "=" * 100)
-            print("PREPAPER SUMMARY (WINNER ONLY)")
+            print("ROBUSTNESS CHECK (TRAIN weekly slices on finalists)")
             print("=" * 100)
-            print(summary_pre.to_string(index=False))
+            print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks | "
+                  f"R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): applied after R1b")
+            for (w0, w1) in train_slices:
+                print(f"  - {w0} -> {w1}")
 
-            best_pre = res_pre["best"]
+            robust_rows = []
+
+            # Build full-range events per scenario ONCE (so events_all is in-scope here)
+            events_all_by_scen: dict[str, pd.DataFrame] = {}
+            for cand in best_per_candidate:
+                scen = str(cand["scenario"]).strip().upper()
+                if scen not in events_all_by_scen:
+                    events_all_by_scen[scen] = build_events_all_for_robustness(
+                        d_features=d,
+                        train_start=train_start,
+                        trade_end=trade_end,
+                        scenario=scen,
+                    )
+
+            for cand in best_per_candidate:
+                scen = str(cand["scenario"]).strip().upper()
+                exitp = (params_by_scen[scen].get("exit_params", {}) or {})
+                k0 = float(exitp["k"])
+                t0 = float(exitp["t"])
+                x0 = int(exitp["x_bars"])
+
+                rob = eval_candidate_robustness_over_train(
+                    pair=pair,
+                    scenario=scen,
+                    ohlcv=ohlcv,
+                    d_features=d,
+                    events_all=events_all_by_scen[scen],  # <<< key fix
+                    slices=train_slices,
+                    k=k0,
+                    t=t0,
+                    x_bars=x0,
+                    initial_capital=initial_capital,
+                    trade_size=trade_size,
+                )
+                robust_rows.append(rob)
+
+                print("\n" + "-" * 100)
+                print(f"[ROBUST] {scen} | k={k0} t={t0} x={x0}")
+                print(f"  R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): {rob['pos_weeks']}/{rob['n_slices']} weeks pass (need all {rob['n_slices']})")
+                print(f"  R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): {rob['worst_week_net_profit']:.2f}")
+                print(f"     median_profit_over_maxdd: {rob['median_profit_over_maxdd']:.4f}")
+                print(f"     median_net_profit: {rob['median_net_profit']:.2f}")
+                    
+                dfw = rob["df_slices"]
+                if dfw is not None and not dfw.empty:
+                    for _, row in dfw.iterrows():
+                        w0 = row["slice_start"]
+                        w1 = row["slice_end"]
+                        nev = int(row.get("events_in_slice", 0))
+                        nop = int(row.get("opens_in_slice", 0))
+                        ncl = int(row.get("closes_in_slice", 0))
+                        nopen_end = int(row.get("open_positions_end", 0))
+                        net = float(row.get("net_profit", 0.0))
+                        r1p = "PASS" if bool(row.get("r1_week_pass", False)) else "FAIL"
+                        r2p = "PASS" if bool(row.get("r2_week_pass", False)) else "FAIL"
+                        print(f"   - W{int(row['slice_ix'])} {w0} -> {w1} | events={nev:3d} | opens={nop:3d} | closes={ncl:3d} | open_end={nopen_end:2d} | net={net:+10.2f} | R1b_week={r1p} | R2_week={r2p}")
+
+            # Apply gates (ROBUST)                
+            gated = [
+                r for r in robust_rows
+                if bool(r.get("all_weeks_pass", False))  # R1b: 4/4 weeks net >= ROBUST_WEEK_NET_MIN
+                and (float(r["worst_week_net_profit"]) > float(ROBUST_WORST_WEEK_NET_MIN))  # R2
+            ]
+
+            if not gated:
+                print("\n" + "=" * 100)
+                print(f"[ROBUST][GATE] {pair_label}: NO TRADE THIS WEEK — no finalist passed TRAIN robustness gates (R1b 4/4 + R2).")
+                print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks to pass")
+                print(f"R2  (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): worst week net must exceed threshold")
+                print("=" * 100)
+                return
+
+            gated_sorted = sorted(
+                gated,
+                key=lambda r: (float(r["median_profit_over_maxdd"]), float(r["median_net_profit"])),
+                reverse=True,
+            )
+            robust_pick = gated_sorted[0]
+
             print("\n" + "=" * 100)
-            print("PREPAPER WINNER MODE (baseline vs barrier)")
+            print("ROBUST WINNER (TRAIN walk-forward)")
             print("=" * 100)
-            print(f"scenario           : {best_pre.get('scenario')}")
-            print(f"label              : {best_pre.get('label')}")
-            print(f"trades             : {best_pre.get('trades')}")
-            print(f"net_profit         : {best_pre.get('net_profit')}")
-            print(f"win_rate           : {best_pre.get('win_rate')}")
-            print(f"profit_factor      : {best_pre.get('profit_factor')}")
-            print(f"avg_pnl            : {best_pre.get('avg_pnl')}")
-            print(f"max_dd_pct         : {best_pre.get('max_dd_pct')}")
-            print(f"max_dd_usdt        : {best_pre.get('max_dd_usdt')}")
-            print(f"profit_over_maxdd  : {best_pre.get('profit_over_maxdd')}")
+            print(f"scenario={robust_pick['scenario']}")
+            print(f"median_profit_over_maxdd={robust_pick['median_profit_over_maxdd']:.4f}")
+            print(f"median_net_profit={robust_pick['median_net_profit']:.2f}")
+            print(f"pos_weeks={robust_pick['pos_weeks']}/{robust_pick['n_slices']}")
+            print(f"worst_week_net_profit={robust_pick['worst_week_net_profit']:.2f}")
 
-            ident_pre = f"{pre_start.strftime('%Y-%m-%d_%H%M')}_to_{pre_end.strftime('%Y-%m-%d_%H%M')}"
-            out_pre = os.path.join(OUT_DIR, f"forwardtest_PREPAPER_7d_WINNER_{ident_pre}_{win_scenario}_{pair}.xlsx")
+            # Restrict finalists to robust scenario only before Trade-window final selection
+            best_per_candidate = [
+                x for x in best_per_candidate
+                if str(x["scenario"]).strip().upper() == str(robust_pick["scenario"]).strip().upper()
+            ]
 
-            with pd.ExcelWriter(out_pre, engine="openpyxl") as w:
-                summary_pre.to_excel(w, sheet_name="summary", index=False)
-                strip_tz(res_pre["events"].copy(), ["event_time"]).to_excel(w, sheet_name="events", index=False)
-                strip_tz(res_pre["trades_baseline"].copy(), ["entry_time", "exit_time"]).to_excel(w, sheet_name="trades_baseline", index=False)
-                strip_tz(res_pre["trades_barrier"].copy(), ["entry_time", "exit_time"]).to_excel(w, sheet_name="trades_barrier", index=False)
-                strip_tz(res_pre["equity_baseline"].copy(), ["time"]).to_excel(w, sheet_name="equity_baseline", index=False)
-                strip_tz(res_pre["equity_barrier"].copy(), ["time"]).to_excel(w, sheet_name="equity_barrier", index=False)
-
-            print(f"\nSaved PrePaper workbook: {out_pre}")
-
-            # IMPORTANT: stop here so we don't continue into MANUAL mode simulation below
+        # Winner across candidates (same scoring as your choose_winner_across_scenarios)
+        winner = choose_winner_across_candidates(best_per_candidate, pair_label=pair_label)
+        if not winner:
             return
+        win_scenario = str(winner["scenario"]).strip().upper()
+        win_params = params_by_scen[win_scenario]
+        exitp = win_params.get("exit_params", {}) or {}
+        win_k = float(exitp["k"])
+        win_t = float(exitp["t"])
+        win_x = int(exitp["x_bars"])
+
+        print("\n" + "=" * 100)
+        print("WINNER (BEST-OF PER CANDIDATE)")
+        print("=" * 100)
+
+        print(f"scenario           : {winner.get('scenario')}")
+        print(f"label              : {winner.get('label')}")
+        print(f"trades             : {winner.get('trades')}")
+        print(f"net_profit         : {winner.get('net_profit')}")
+        print(f"win_rate           : {winner.get('win_rate')}")
+        print(f"profit_factor      : {winner.get('profit_factor')}")
+        print(f"avg_pnl            : {winner.get('avg_pnl')}")
+        print(f"max_dd_pct         : {winner.get('max_dd_pct')}")
+        print(f"max_dd_usdt        : {winner.get('max_dd_usdt')}")
+        print(f"profit_over_maxdd  : {winner.get('profit_over_maxdd')}")
+            
+        # --- save trade window workbook ---
+        ident = f"{trade_start.strftime('%Y-%m-%d_%H%M')}_to_{trade_end.strftime('%Y-%m-%d_%H%M')}"
+        out_trade = os.path.join(OUT_DIR, f"forwardtest_TRADEWINDOW_7d_ALLCANDS_{ident}_{pair}.xlsx")
+        with pd.ExcelWriter(out_trade, engine="openpyxl") as w:
+            summary_trade.to_excel(w, sheet_name="summary_all_candidates", index=False)
+
+        print(f"\nSaved: {out_trade}")
+            
+        # -----------------------------
+        # PREPAPER (winner only): user-provided Monday 08:00 UTC for 7 days
+        # -----------------------------
+            
+        print("\n" + "=" * 100)
+                        
+        # -----------------------------
+        # PREPAPER (winner only): reuse same fetched ohlcv + features
+        # -----------------------------
+        print("\n" + "=" * 100)
+        print(f"PREPAPER WINDOW (UTC): {pre_start} -> {pre_end} | Pair={pair} | Scenario={win_scenario}")
+        print("=" * 100)
+
+        res_pre = run_one_scenario_both_modes(
+            pair=pair,
+            scenario=win_scenario,
+            trade_start=pre_start,
+            trade_end=pre_end,
+            ohlcv=ohlcv,
+            d_features=d,
+            k=win_k,
+            t=win_t,
+            x_bars=win_x,
+            initial_capital=initial_capital,
+            trade_size=trade_size,
+        )
+
+        summary_pre = pd.DataFrame([res_pre["summary_baseline"], res_pre["summary_barrier"]])
+
+        print("\n" + "=" * 100)
+        print("PREPAPER SUMMARY (WINNER ONLY)")
+        print("=" * 100)
+        print(summary_pre.to_string(index=False))
+
+        best_pre = res_pre["best"]
+        print("\n" + "=" * 100)
+        print("PREPAPER WINNER MODE (baseline vs barrier)")
+        print("=" * 100)
+        print(f"scenario           : {best_pre.get('scenario')}")
+        print(f"label              : {best_pre.get('label')}")
+        print(f"trades             : {best_pre.get('trades')}")
+        print(f"net_profit         : {best_pre.get('net_profit')}")
+        print(f"win_rate           : {best_pre.get('win_rate')}")
+        print(f"profit_factor      : {best_pre.get('profit_factor')}")
+        print(f"avg_pnl            : {best_pre.get('avg_pnl')}")
+        print(f"max_dd_pct         : {best_pre.get('max_dd_pct')}")
+        print(f"max_dd_usdt        : {best_pre.get('max_dd_usdt')}")
+        print(f"profit_over_maxdd  : {best_pre.get('profit_over_maxdd')}")
+
+        ident_pre = f"{pre_start.strftime('%Y-%m-%d_%H%M')}_to_{pre_end.strftime('%Y-%m-%d_%H%M')}"
+        out_pre = os.path.join(OUT_DIR, f"forwardtest_PREPAPER_7d_WINNER_{ident_pre}_{win_scenario}_{pair}.xlsx")
+
+        with pd.ExcelWriter(out_pre, engine="openpyxl") as w:
+            summary_pre.to_excel(w, sheet_name="summary", index=False)
+            strip_tz(res_pre["events"].copy(), ["event_time"]).to_excel(w, sheet_name="events", index=False)
+            strip_tz(res_pre["trades_baseline"].copy(), ["entry_time", "exit_time"]).to_excel(w, sheet_name="trades_baseline", index=False)
+            strip_tz(res_pre["trades_barrier"].copy(), ["entry_time", "exit_time"]).to_excel(w, sheet_name="trades_barrier", index=False)
+            strip_tz(res_pre["equity_baseline"].copy(), ["time"]).to_excel(w, sheet_name="equity_baseline", index=False)
+            strip_tz(res_pre["equity_barrier"].copy(), ["time"]).to_excel(w, sheet_name="equity_barrier", index=False)
+
+        print(f"\nSaved PrePaper workbook: {out_pre}")
+
+        # IMPORTANT: stop here so we don't continue into MANUAL mode simulation below
+        return
 
 if __name__ == "__main__":
     main()
