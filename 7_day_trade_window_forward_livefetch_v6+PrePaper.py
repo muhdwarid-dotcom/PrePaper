@@ -118,8 +118,9 @@ ROBUST_TRAIN_SLICES = 4              # 4 weeks inside TRAIN
 ROBUST_MIN_POS_WEEKS = 3             # R1: >=3/4 positive weeks
 ROBUST_WORST_WEEK_NET_MIN = -200.0   # R2 gate: worst week net_profit must be > -X (tune)
 ROBUST_RANK_PRIMARY = "median_profit_over_maxdd"  # for display; we will rank by this after gates
-ROBUST_WEEK_NET_MIN = 500.0      # R1b: each slice/week must earn at least this net profit
+ROBUST_WEEK_NET_MIN = 500.0      # R1: each slice/week must earn at least this net profit
 ROBUST_REQUIRE_ALL_WEEKS = True  # enforce 4/4 passing R1_week
+ROBUST_MEDIAN_POMDD_MIN = 0.8    # R3: median_profit_over_maxdd must be >= this
 
 def load_event_times_from_csv(path: str) -> set[pd.Timestamp]:
     df = pd.read_csv(path)
@@ -1133,7 +1134,7 @@ def choose_winner_across_candidates(best_list: list[Dict[str, Any]], *, pair_lab
 
     if not eligible:
         print("\n" + "=" * 100)
-        print(f"[WINNER][GATE] {pair_label}: NO TRADE THIS WEEK — no candidate met winner constraints "
+        print(f"[WINNER][GATE] {pair_label}: NO TRADE FOR PREPAPER — no candidate met winner constraints "
               f"(min_trades={WIN_MIN_TRADES}, min_pf={WIN_MIN_PROFIT_FACTOR}, "
               f"max_abs_dd_usdt={WIN_MAX_ABS_DD_USDT}, require_pos_net={WIN_REQUIRE_POSITIVE_NET}).")
         print("=" * 100)
@@ -1531,10 +1532,41 @@ def main():
             
         # -----------------------------
         # ROBUSTNESS (TRAIN walk-forward on finalists)
-        # Gate R1b: all weeks net_profit >= ROBUST_WEEK_NET_MIN
+        # Gate R1: all weeks net_profit >= ROBUST_WEEK_NET_MIN
         # Gate R2: worst-week net_profit > ROBUST_WORST_WEEK_NET_MIN
+        # Gate R3: median_profit_over_maxdd >= ROBUST_MEDIAN_POMDD_MIN
         # Ranking: median profit_over_maxdd, tie-break median net_profit
         # -----------------------------
+
+        def _print_robust_block(rob: dict) -> None:
+            """Print the full detailed robustness block for one candidate."""
+            scen = rob["scenario"]
+            k = rob["k"]
+            t = rob["t"]
+            x = rob["x_bars"]
+            r1 = bool(rob.get("all_weeks_pass", False))
+            r2 = float(rob.get("worst_week_net_profit", 0.0)) > float(ROBUST_WORST_WEEK_NET_MIN)
+            r3 = float(rob.get("median_profit_over_maxdd", 0.0)) >= float(ROBUST_MEDIAN_POMDD_MIN)
+            print("\n" + "-" * 100)
+            print(f"[ROBUST] {scen} | k={k} t={t} x={x}")
+            print(f"  R1 (weekly_net>={ROBUST_WEEK_NET_MIN}): {rob['pos_weeks']}/{rob['n_slices']} weeks pass (need all {rob['n_slices']}) => {'PASS' if r1 else 'FAIL'}")
+            print(f"  R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): {rob['worst_week_net_profit']:.2f} => {'PASS' if r2 else 'FAIL'}")
+            print(f"  R3 (median_profit_over_maxdd>={ROBUST_MEDIAN_POMDD_MIN}): {rob['median_profit_over_maxdd']:.4f} => {'PASS' if r3 else 'FAIL'}")
+            print(f"     median_net_profit: {rob['median_net_profit']:.2f}")
+            dfw = rob["df_slices"]
+            if dfw is not None and not dfw.empty:
+                for _, row in dfw.iterrows():
+                    w0 = row["slice_start"]
+                    w1 = row["slice_end"]
+                    nev = int(row.get("events_in_slice", 0))
+                    nop = int(row.get("opens_in_slice", 0))
+                    ncl = int(row.get("closes_in_slice", 0))
+                    nopen_end = int(row.get("open_positions_end", 0))
+                    net = float(row.get("net_profit", 0.0))
+                    r1p = "PASS" if bool(row.get("r1_week_pass", False)) else "FAIL"
+                    r2p = "PASS" if bool(row.get("r2_week_pass", False)) else "FAIL"
+                    print(f"   - W{int(row['slice_ix'])} {w0} -> {w1} | events={nev:3d} | opens={nop:3d} | closes={ncl:3d} | open_end={nopen_end:2d} | net={net:+10.2f} | R1_week={r1p} | R2_week={r2p}")
+
         print(f"[DEBUG] ROBUST_ENABLE={ROBUST_ENABLE!r}")
         if ROBUST_ENABLE:
             print("[DEBUG] entered ROBUST block")
@@ -1545,8 +1577,9 @@ def main():
             print("\n" + "=" * 100)
             print("ROBUSTNESS CHECK (TRAIN weekly slices on finalists)")
             print("=" * 100)
-            print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks | "
-                  f"R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): applied after R1b")
+            print(f"R1 (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks | "
+                  f"R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): applied after R1 | "
+                  f"R3 (median_profit_over_maxdd>={ROBUST_MEDIAN_POMDD_MIN}): applied after R2")
             for (w0, w1) in train_slices:
                 print(f"  - {w0} -> {w1}")
 
@@ -1585,40 +1618,30 @@ def main():
                     trade_size=trade_size,
                 )
                 robust_rows.append(rob)
-
-                print("\n" + "-" * 100)
-                print(f"[ROBUST] {scen} | k={k0} t={t0} x={x0}")
-                print(f"  R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): {rob['pos_weeks']}/{rob['n_slices']} weeks pass (need all {rob['n_slices']})")
-                print(f"  R2 (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): {rob['worst_week_net_profit']:.2f}")
-                print(f"     median_profit_over_maxdd: {rob['median_profit_over_maxdd']:.4f}")
-                print(f"     median_net_profit: {rob['median_net_profit']:.2f}")
-                    
-                dfw = rob["df_slices"]
-                if dfw is not None and not dfw.empty:
-                    for _, row in dfw.iterrows():
-                        w0 = row["slice_start"]
-                        w1 = row["slice_end"]
-                        nev = int(row.get("events_in_slice", 0))
-                        nop = int(row.get("opens_in_slice", 0))
-                        ncl = int(row.get("closes_in_slice", 0))
-                        nopen_end = int(row.get("open_positions_end", 0))
-                        net = float(row.get("net_profit", 0.0))
-                        r1p = "PASS" if bool(row.get("r1_week_pass", False)) else "FAIL"
-                        r2p = "PASS" if bool(row.get("r2_week_pass", False)) else "FAIL"
-                        print(f"   - W{int(row['slice_ix'])} {w0} -> {w1} | events={nev:3d} | opens={nop:3d} | closes={ncl:3d} | open_end={nopen_end:2d} | net={net:+10.2f} | R1b_week={r1p} | R2_week={r2p}")
+                _print_robust_block(rob)
 
             # Apply gates (ROBUST)                
             gated = [
                 r for r in robust_rows
-                if bool(r.get("all_weeks_pass", False))  # R1b: 4/4 weeks net >= ROBUST_WEEK_NET_MIN
+                if bool(r.get("all_weeks_pass", False))  # R1: all weeks net >= ROBUST_WEEK_NET_MIN
                 and (float(r["worst_week_net_profit"]) > float(ROBUST_WORST_WEEK_NET_MIN))  # R2
+                and (float(r["median_profit_over_maxdd"]) >= float(ROBUST_MEDIAN_POMDD_MIN))  # R3
             ]
+
+            # --- END-OF-ROBUSTNESS RECAP: full detailed blocks for ALL finalists (always printed) ---
+            print("\n" + "=" * 100)
+            print("ROBUSTNESS RECAP — ALL FINALISTS (W1..W4 DETAIL)")
+            print("=" * 100)
+            for rob in robust_rows:
+                _print_robust_block(rob)
+            print("=" * 100)
 
             if not gated:
                 print("\n" + "=" * 100)
-                print(f"[ROBUST][GATE] {pair_label}: NO TRADE THIS WEEK — no finalist passed TRAIN robustness gates (R1b 4/4 + R2).")
-                print(f"R1b (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks to pass")
+                print(f"[ROBUST][GATE] {pair_label}: NO TRADE FOR TRADE WINDOW — no finalist passed TRAIN robustness gates (R1 + R2 + R3).")
+                print(f"R1  (weekly_net>={ROBUST_WEEK_NET_MIN}): need all {len(train_slices)} weeks to pass")
                 print(f"R2  (worst_week_net>{ROBUST_WORST_WEEK_NET_MIN}): worst week net must exceed threshold")
+                print(f"R3  (median_profit_over_maxdd>={ROBUST_MEDIAN_POMDD_MIN}): median profit/maxdd must exceed threshold")
                 print("=" * 100)
                 return
 
