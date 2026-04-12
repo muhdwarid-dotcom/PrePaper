@@ -1358,7 +1358,8 @@ def main():
     pair = input("Pair (e.g. ACTUSDT): ").strip().upper()
     pair_label = pair
     run_mode_raw = input("Mode (MANUAL / AUTO_CYCLE): ").strip()
-    run_mode = run_mode_raw.upper().replace('-', '_') or "MANUAL"
+    _normalized = run_mode_raw.upper().replace('-', '_')
+    run_mode = _normalized if _normalized else "MANUAL"
 
     # -----------------------------
     # Schedule anchor: PrePaper start (Rule A)
