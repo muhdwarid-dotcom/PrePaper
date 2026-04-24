@@ -1,30 +1,44 @@
+#!/usr/bin/env python3
+"""
+Funnel Data V30 Event Study — one-pair-at-a-time CLI tool.
+
+Fetches 1-minute OHLCV data from Binance, runs V30 funnel event-study logic,
+and writes a window-stamped CSV for the requested pair.
+
+USAGE (3-step pipeline for one pair):
+  Step 1 — Generate events CSV:
+    python Funnel_Data_Test_V30_EventStudy.py --pair ACTUSDT --prepaper-start 2025-12-01
+
+  Step 2 — Analyse events, generate candidates CSV:
+    python eventstudy_analysis.py forwardtest/v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51_prepaper_2025-12-01.csv \\
+        --pair ACTUSDT --prepaper-start 2025-12-01 --grid
+
+  Step 3 — Derive k/t exit parameters:
+    python Derive_k_t_from_PQ_windows.py --pair ACTUSDT --prepaper-start 2025-12-01
+
+  Then copy/rename the output JSON to candidate_for_TRADE.json and run:
+    python 7_day_trade_window_forward_livefetch_v6+PrePaper.py
+
+WINDOW DERIVATION (from --prepaper-start P):
+  PREPAPER : [P,          P + 7 d)
+  TRADE    : [P - 7 d,    P)
+  TRAIN    : [P - 37 d,   P - 7 d)   (TRADE start − 30 d)
+  Fetch    : [P - 44 d,   P - 7 d)   (TRAIN + 7-day warmup buffer)
+
+OUTPUT:
+  forwardtest/v30_eventstudy_{PAIR}_1m_rsi_sma_cross_gt51_prepaper_{DATE}.csv
+"""
+
+import argparse
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
-import numpy as np
 
-# -----------------------------
-# V30 EVENT STUDY (ACTUSDT_1m.csv)
-# -----------------------------
-# Output format:
-#   - each ROW = event_time (timestamp of RSI_SMA cross-up)
-#   - each COLUMN = metric/field
-#
-# Event definition (cross-up):
-#   prev rsi_sma <= 51 and current rsi_sma > 51
-#
-# For each event:
-#   (2) record entry_close and entry_atr (ATR(14))
-#   (3) scan forward until Close < entry_close (first time), then:
-#       - highest High reached before that
-#       - ATR multiple from entry_close to that high
-#       - time from event_time to that max high
-#
-# NEW requested fields (at event candle):
-#   - close_gt_smma_200: TRUE/FALSE  (close > SMMA_200)
-#   - vol_gt_vol_sma: TRUE/FALSE    (volume > volume_SMA)
-# -----------------------------
-
-CSV_PATH = "ACTUSDT_1m.csv"
+from binance_fetch import fetch_klines_1m
 
 RSI_LEN = 14
 RSI_SMA_LEN = 14
@@ -36,48 +50,44 @@ VOL_SMA_LEN = 20         # default for "vol_sma" (change if you want)
 
 STOP_ON_CLOSE_BELOW_ENTRY = True
 
-TIME_COL_CANDIDATES = ["open_time", "open time", "time", "timestamp", "date", "datetime"]
-
 TRADE_SIZE_USDT = 1000.0
 FEE_RATE_PER_SIDE = 0.001  # 0.1% per side
 
-def load_1m_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
+def compute_windows(prepaper_start_str: str) -> dict:
+    """
+    Derive PREPAPER, TRADE, TRAIN, and fetch-range windows from a PrePaper start date.
 
-    # Normalize headers: lower + strip
-    df.columns = [c.strip().lower() for c in df.columns]
+    Args:
+        prepaper_start_str: 'YYYY-MM-DD' string, treated as 00:00 UTC.
 
-    # Identify time column
-    time_col = None
-    for c in TIME_COL_CANDIDATES:
-        if c in df.columns:
-            time_col = c
-            break
-    if time_col is None:
-        raise ValueError(
-            f"No time column found. Expected one of: {TIME_COL_CANDIDATES}. "
-            f"Got columns: {list(df.columns)}"
-        )
+    Returns:
+        dict with keys 'prepaper', 'trade', 'train', 'fetch', each a (start, end)
+        tuple of UTC-aware datetimes.  Ranges are half-open: [start, end).
+    """
+    prepaper_start = datetime.strptime(prepaper_start_str, "%Y-%m-%d").replace(
+        tzinfo=timezone.utc
+    )
+    trade_start   = prepaper_start - timedelta(days=7)
+    train_start   = trade_start    - timedelta(days=30)
+    warmup_start  = train_start    - timedelta(days=7)   # extra buffer for indicators
 
-    df = df.rename(columns={time_col: "time"})
+    return {
+        "prepaper": (prepaper_start,       prepaper_start + timedelta(days=7)),
+        "trade":    (trade_start,           prepaper_start),
+        "train":    (train_start,           trade_start),
+        "fetch":    (warmup_start,          trade_start),   # covers warmup + TRAIN
+    }
 
-    # Parse time (your sample is ISO with +00:00, this handles it)
-    df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
-    df = df.dropna(subset=["time"]).copy()
 
-    # Clean numeric columns
-    for col in ["open", "high", "low", "close"]:
-        if col not in df.columns:
-            raise ValueError(f"Missing required column: {col}")
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+def prepare_df_from_binance(symbol: str, fetch_start: datetime, fetch_end: datetime) -> pd.DataFrame:
+    """Fetch klines from Binance and return a normalised DataFrame ready for indicators."""
+    raw = fetch_klines_1m(symbol, fetch_start, fetch_end)
 
-    if "volume" not in df.columns:
-        raise ValueError("Missing required column: volume")
-
-    # Your sample shows volume may be "-" -> coerce to NaN then fill with 0
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+    # Rename open_time -> time to match existing indicator/event logic
+    df = raw.rename(columns={"open_time": "time"})
 
     df = df.dropna(subset=["open", "high", "low", "close"]).copy()
+    df["volume"] = df["volume"].fillna(0.0)
     df = df.sort_values("time").reset_index(drop=True)
 
     return df
@@ -314,13 +324,83 @@ def summarize(out: pd.DataFrame) -> None:
     pnl_sum(out, BOTH_TRUE & out["vol_ratio_ge_15"], "both TRUE + vol_ratio_ge_15")
 
 def main():
-    df = load_1m_csv(CSV_PATH)
+    parser = argparse.ArgumentParser(
+        description=(
+            "V30 Event Study — fetch 1m klines from Binance for one pair and "
+            "generate a window-stamped events CSV."
+        )
+    )
+    parser.add_argument(
+        "--pair",
+        required=True,
+        help="Binance trading pair symbol, e.g. ACTUSDT",
+    )
+    parser.add_argument(
+        "--prepaper-start",
+        default="2025-12-01",
+        metavar="YYYY-MM-DD",
+        help="PrePaper window start date (00:00 UTC). Default: 2025-12-01",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default="forwardtest",
+        help="Output directory (default: forwardtest)",
+    )
+    args = parser.parse_args()
+
+    pair = args.pair.upper()
+    prepaper_start_str = args.prepaper_start
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Derive windows
+    windows = compute_windows(prepaper_start_str)
+    fetch_start, fetch_end = windows["fetch"]
+    train_start, train_end = windows["train"]
+    trade_start, _         = windows["trade"]
+
+    print(f"Pair           : {pair}")
+    print(f"PrePaper start : {prepaper_start_str}")
+    print(f"TRAIN window   : {train_start.date()} → {train_end.date()}")
+    print(f"TRADE window   : {train_end.date()} → {windows['trade'][1].date()}")
+    print(f"Fetch range    : {fetch_start.date()} → {fetch_end.date()} (incl. warmup)")
+
+    # Fetch from Binance
+    try:
+        df = prepare_df_from_binance(pair, fetch_start, fetch_end)
+    except Exception as e:
+        print(f"Error fetching data from Binance: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if df.empty:
+        print("Error: No data returned from Binance.", file=sys.stderr)
+        sys.exit(1)
+
+    # Compute indicators on full fetched range (so warmup rows are included)
     df = compute_indicators(df)
 
-    out = analyze_events(df)
+    # Run event study on full range; then filter output to TRAIN window
+    all_events = analyze_events(df)
 
-    # overwrite previous file name (as you requested you renamed the first version)
-    out_path = "v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51.csv"
+    if all_events.empty:
+        print("Warning: No events found in the fetched range.")
+        out = all_events
+    else:
+        # Filter to TRAIN window: [train_start, train_end)
+        event_index = pd.to_datetime(all_events.index, utc=True)
+        mask = (event_index >= train_start) & (event_index < train_end)
+        out = all_events.loc[mask]
+        print(
+            f"\nEvents in full fetch range : {len(all_events)}"
+            f"\nEvents in TRAIN window     : {len(out)}"
+        )
+
+    # Window-stamped output filename
+    out_filename = (
+        f"v30_eventstudy_{pair}_1m_rsi_sma_cross_gt51"
+        f"_prepaper_{prepaper_start_str}.csv"
+    )
+    out_path = out_dir / out_filename
     out.to_csv(out_path, index=True)
 
     summarize(out)
