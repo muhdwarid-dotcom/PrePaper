@@ -65,7 +65,7 @@ def fetch_klines_1m(
             "symbol":    symbol.upper(),
             "interval":  interval,
             "startTime": current_ms,
-            "endTime":   end_ms - 1,   # API treats endTime as inclusive
+            "endTime":   end_ms - 1,   # subtract 1 ms to convert exclusive end_dt to inclusive API endTime
             "limit":     MAX_LIMIT,
         }
 

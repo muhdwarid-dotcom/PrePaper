@@ -1196,7 +1196,7 @@ def main():
     args = parser.parse_args()
     args.pnl_column = args.pnl_column.lower()
 
-    pair = args.pair.upper() if args.pair else None
+    pair = args.pair.upper() if args.pair and args.pair.strip() else None
     prepaper_date = args.prepaper_start
 
     # -----------------------------------------------------------------------

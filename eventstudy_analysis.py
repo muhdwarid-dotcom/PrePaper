@@ -138,7 +138,12 @@ def main():
 
     # Resolve pair and prepaper-start (explicit args override filename inference)
     inferred_pair, inferred_date = _infer_pair_and_date(str(csv_path))
-    pair = (args.pair or inferred_pair or "").upper() or None
+    if args.pair and args.pair.strip():
+        pair = args.pair.strip().upper()
+    elif inferred_pair:
+        pair = inferred_pair.upper()
+    else:
+        pair = None
     prepaper_date = args.prepaper_start or inferred_date or None
 
     # Build default output paths

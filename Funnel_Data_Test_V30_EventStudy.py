@@ -362,7 +362,7 @@ def main():
     print(f"Pair           : {pair}")
     print(f"PrePaper start : {prepaper_start_str}")
     print(f"TRAIN window   : {train_start.date()} → {train_end.date()}")
-    print(f"TRADE window   : {train_end.date()} → {_trade_end_str(windows)}")
+    print(f"TRADE window   : {train_end.date()} → {windows['trade'][1].date()}")
     print(f"Fetch range    : {fetch_start.date()} → {fetch_end.date()} (incl. warmup)")
 
     # Fetch from Binance
@@ -408,11 +408,6 @@ def main():
     if not out.empty:
         print("\nFirst 10 events (preview):")
         print(out.head(10).to_string())
-
-
-def _trade_end_str(windows: dict) -> str:
-    """Return trade window end date as string for display."""
-    return str(windows["trade"][1].date())
 
 
 if __name__ == "__main__":
