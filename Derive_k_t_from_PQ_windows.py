@@ -1,18 +1,32 @@
 #!/usr/bin/env python3
 """
-Derive k, t, and x_bars exit parameters from event study data.
+Derive k, t, and x_bars exit parameters from event study data — one-pair-at-a-time.
 
 This script:
-1. Loads top candidates from eventstudy_list_summary.csv
+1. Loads top candidates from eventstudy_list_summary_{PAIR}_prepaper_{DATE}.csv
 2. Filters events by candidate rules (close, vol, vol_rule)
 3. Calculates exit parameters: k, t, and barrier delay x_bars
 4. Outputs results in structured JSON format
 
 Key concept: x_bars is a GATE/ACTIVATION DELAY for k and t stops.
 Stops (k, t) only activate after x_bars bars have elapsed from entry.
+
+USAGE (Step 3 in the 3-step pipeline):
+  python Derive_k_t_from_PQ_windows.py --pair ACTUSDT --prepaper-start 2025-12-01
+
+  When --pair and --prepaper-start are supplied, the script auto-locates:
+    candidates CSV : forwardtest/eventstudy_list_summary_{PAIR}_prepaper_{DATE}.csv
+    events CSV     : forwardtest/v30_eventstudy_{PAIR}_1m_*_prepaper_{DATE}.csv
+
+  Output:
+    candidate_exit_params_{PAIR}_prepaper_{DATE}.json
+
+  Then copy/rename to candidate_for_TRADE.json and run:
+    python 7_day_trade_window_forward_livefetch_v6+PrePaper.py
 """
 
 import argparse
+import glob
 import json
 import sys
 from pathlib import Path
@@ -1037,25 +1051,59 @@ def process_candidates(
     return results
 
 
+def _auto_find_csv(pattern: str) -> Optional[str]:
+    """
+    Glob for files matching *pattern* and return the most recently modified one,
+    or None if no match is found.
+    """
+    matches = glob.glob(pattern)
+    if not matches:
+        return None
+    return max(matches, key=lambda p: Path(p).stat().st_mtime)
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description='Derive k, t, and x_bars exit parameters from event study data'
     )
     parser.add_argument(
+        '--pair',
+        default=None,
+        help='Trading pair symbol (e.g. ACTUSDT). Used to auto-locate input CSVs and name output JSON.'
+    )
+    parser.add_argument(
+        '--prepaper-start',
+        default='2025-12-01',
+        metavar='YYYY-MM-DD',
+        help='PrePaper window start date (default: 2025-12-01). Used to auto-locate input CSVs and name output JSON.'
+    )
+    parser.add_argument(
         '--candidates-csv',
-        default='forwardtest/eventstudy_list_summary.csv',
-        help='Path to eventstudy_list_summary.csv (default: forwardtest/eventstudy_list_summary.csv)'
+        default=None,
+        help=(
+            'Path to eventstudy_list_summary CSV. '
+            'Auto-selected from forwardtest/eventstudy_list_summary_{PAIR}_prepaper_{DATE}.csv '
+            'when --pair is supplied and this arg is omitted.'
+        )
     )
     parser.add_argument(
         '--events-csv',
-        default='v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51_2025-10-18_FIXED_SMMA.csv',
-        help='Path to event study CSV file (default: v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51_2025-10-18_FIXED_SMMA.csv)'
+        default=None,
+        help=(
+            'Path to event study CSV file. '
+            'Auto-selected from forwardtest/v30_eventstudy_{PAIR}_1m_*_prepaper_{DATE}.csv '
+            'when --pair is supplied and this arg is omitted.'
+        )
     )
     parser.add_argument(
         '--output',
-        default='candidate_exit_params.json',
-        help='Output JSON file path (default: candidate_exit_params.json)'
+        default=None,
+        help=(
+            'Output JSON file path. '
+            'Default: candidate_exit_params_{PAIR}_prepaper_{DATE}.json '
+            '(falls back to candidate_exit_params.json when pair/date unknown)'
+        )
     )
     parser.add_argument(
         '--top-n',
@@ -1147,7 +1195,56 @@ def main():
     
     args = parser.parse_args()
     args.pnl_column = args.pnl_column.lower()
-    
+
+    pair = args.pair.upper() if args.pair else None
+    prepaper_date = args.prepaper_start
+
+    # -----------------------------------------------------------------------
+    # Auto-locate input CSVs when --pair is given but paths not explicitly set
+    # -----------------------------------------------------------------------
+    candidates_csv_arg = args.candidates_csv
+    events_csv_arg = args.events_csv
+
+    if pair and not candidates_csv_arg:
+        pattern = f"forwardtest/eventstudy_list_summary_{pair}_prepaper_{prepaper_date}.csv"
+        found = _auto_find_csv(pattern)
+        if found:
+            candidates_csv_arg = found
+        else:
+            print(
+                f"Error: Could not auto-locate candidates CSV matching: {pattern}\n"
+                "Run eventstudy_analysis.py first, or supply --candidates-csv explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if pair and not events_csv_arg:
+        pattern = f"forwardtest/v30_eventstudy_{pair}_1m_*_prepaper_{prepaper_date}.csv"
+        found = _auto_find_csv(pattern)
+        if found:
+            events_csv_arg = found
+        else:
+            print(
+                f"Error: Could not auto-locate events CSV matching: {pattern}\n"
+                "Run Funnel_Data_Test_V30_EventStudy.py first, or supply --events-csv explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # Fallback to legacy defaults when neither --pair nor explicit paths are given
+    if not candidates_csv_arg:
+        candidates_csv_arg = 'forwardtest/eventstudy_list_summary.csv'
+    if not events_csv_arg:
+        events_csv_arg = 'v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51_2025-10-18_FIXED_SMMA.csv'
+
+    # Build default output path
+    if args.output:
+        output_path_str = args.output
+    elif pair and prepaper_date:
+        output_path_str = f"candidate_exit_params_{pair}_prepaper_{prepaper_date}.json"
+    else:
+        output_path_str = 'candidate_exit_params.json'
+
     # Parse x_quantiles
     try:
         x_quantiles = [float(q.strip()) for q in args.x_quantiles.split(',') if q.strip()]
@@ -1169,12 +1266,12 @@ def main():
         sys.exit(1)
     
     # Validate input files
-    candidates_path = Path(args.candidates_csv)
+    candidates_path = Path(candidates_csv_arg)
     if not candidates_path.exists():
         print(f"Error: Candidates CSV not found: {candidates_path}", file=sys.stderr)
         sys.exit(1)
     
-    events_path = Path(args.events_csv)
+    events_path = Path(events_csv_arg)
     if not events_path.exists():
         print(f"Error: Events CSV not found: {events_path}", file=sys.stderr)
         sys.exit(1)
@@ -1198,6 +1295,7 @@ def main():
         sys.exit(1)
     
     print(f"Loading event data from: {events_path}")
+
     
     # Load events
     try:
@@ -1331,12 +1429,14 @@ def main():
     print('='*80)
     
     # Write JSON output
-    output_path = Path(args.output)
+    output_path = Path(output_path_str)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     try:
         output_data = {
             'metadata': {
+                'pair': pair,
+                'prepaper_start': prepaper_date,
                 'candidates_csv': str(candidates_path),
                 'events_csv': str(events_path),
                 'kt_quantile': args.kt_quantile,

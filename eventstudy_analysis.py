@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """
-Event Study Analysis CLI
+Event Study Analysis CLI — one-pair-at-a-time.
 
-Reproduces Excel study logic for ACTUSDT event-study candidates.
-Reads CSV, applies transformations, computes metrics, and outputs results.
+Reads a V30 event-study CSV, applies transformations, computes metrics,
+and writes pair-identified, window-stamped output CSVs.
+
+USAGE (Step 2 in the 3-step pipeline):
+  python eventstudy_analysis.py \\
+      forwardtest/v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51_prepaper_2025-12-01.csv \\
+      --pair ACTUSDT --prepaper-start 2025-12-01 --grid
+
+  Outputs:
+    forwardtest/eventstudy_list_summary_ACTUSDT_prepaper_2025-12-01.csv
+    forwardtest/top20_view_ACTUSDT_prepaper_2025-12-01.csv
+
+  (--pair and --prepaper-start are inferred from the input filename when possible.)
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 import pandas as pd
@@ -19,17 +31,23 @@ pd.set_option('display.max_columns', 50)
 pd.set_option('display.max_colwidth', 40)
 pd.set_option('display.float_format', lambda x: f'{x:,.6f}')
 
-df = pd.read_csv(r'.\forwardtest\eventstudy_list_summary.csv')
 
-cols = [
-    'Possibility','close','vol','vol_rule',
-    'Trades','Total_Net_PnL','Score',
-    'p_peak_within_tb','p_dip_below_entry_within_tb',
-    'median_time_to_peak_min','median_time_to_dip_min','median_dip_below_entry_pct',
-    'Rank'
-]
+def _infer_pair_and_date(filename: str):
+    """
+    Try to extract pair and prepaper date from an eventstudy filename.
 
-print(df[cols].head(20).to_string(index=False))
+    Expected pattern:
+        v30_eventstudy_{PAIR}_1m_rsi_sma_cross_gt51_prepaper_{YYYY-MM-DD}.csv
+    Returns (pair, date_str) or (None, None) if not matched.
+    """
+    m = re.search(
+        r'v30_eventstudy_([A-Z0-9]+)_1m_.*?_prepaper_(\d{4}-\d{2}-\d{2})',
+        Path(filename).name,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).upper(), m.group(2)
+    return None, None
 
 def main():
     """Main CLI entry point."""
@@ -38,12 +56,27 @@ def main():
     )
     parser.add_argument(
         'csv_path',
-        help='Path to the source CSV file (e.g., v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51.csv)'
+        help='Path to the source CSV file (e.g., forwardtest/v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51_prepaper_2025-12-01.csv)'
+    )
+    parser.add_argument(
+        '--pair',
+        default=None,
+        help='Trading pair symbol (e.g. ACTUSDT). Inferred from filename when not supplied.'
+    )
+    parser.add_argument(
+        '--prepaper-start',
+        default=None,
+        metavar='YYYY-MM-DD',
+        help='PrePaper window start date. Inferred from filename when not supplied.'
     )
     parser.add_argument(
         '--output',
-        default='forwardtest/eventstudy_list_summary.csv',
-        help='Output CSV path (default: forwardtest/eventstudy_list_summary.csv)'
+        default=None,
+        help=(
+            'Output CSV path for the full summary. '
+            'Default: forwardtest/eventstudy_list_summary_{PAIR}_prepaper_{DATE}.csv '
+            '(falls back to forwardtest/eventstudy_list_summary.csv when pair/date unknown)'
+        )
     )
     parser.add_argument(
         '--no-print',
@@ -102,8 +135,31 @@ def main():
     if not csv_path.exists():
         print(f"Error: CSV file not found: {csv_path}", file=sys.stderr)
         sys.exit(1)
-    
+
+    # Resolve pair and prepaper-start (explicit args override filename inference)
+    inferred_pair, inferred_date = _infer_pair_and_date(str(csv_path))
+    pair = (args.pair or inferred_pair or "").upper() or None
+    prepaper_date = args.prepaper_start or inferred_date or None
+
+    # Build default output paths
+    if args.output:
+        output_path = Path(args.output)
+    elif pair and prepaper_date:
+        output_path = Path("forwardtest") / f"eventstudy_list_summary_{pair}_prepaper_{prepaper_date}.csv"
+    else:
+        output_path = Path("forwardtest/eventstudy_list_summary.csv")
+
+    # Derive top20_view path from output path
+    if pair and prepaper_date:
+        top20_path = Path("forwardtest") / f"top20_view_{pair}_prepaper_{prepaper_date}.csv"
+    else:
+        top20_path = Path("forwardtest/top20_view.csv")
+
     print(f"Loading data from: {csv_path}")
+    if pair:
+        print(f"Pair: {pair}")
+    if prepaper_date:
+        print(f"PrePaper start: {prepaper_date}")
     
     # Load and transform data
     try:
@@ -195,13 +251,19 @@ def main():
             print("No eligible candidates found for categories.")
         print("="*80 + "\n")
     
-    # Write to CSV
-    output_path = Path(args.output)
+    # Write full summary CSV
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     try:
         formatted_df.to_csv(output_path, index=False)
         print(f"Results written to: {output_path}")
+
+        # Write top-20 view CSV
+        eligible = formatted_df[formatted_df['Score'].notna()]
+        top20 = eligible.head(20)
+        top20_path.parent.mkdir(parents=True, exist_ok=True)
+        top20.to_csv(top20_path, index=False)
+        print(f"Top-20 view written to: {top20_path}")
         
         if args.top_gate_families:
             df_sel = formatted_df.copy()

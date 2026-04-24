@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# Generated pipeline artifacts — do not commit
+forwardtest/*.csv
+forwardtest/*.xlsx
+*.csv
+*.xlsx
+candidate_exit_params*.json
