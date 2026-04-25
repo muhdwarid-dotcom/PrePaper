@@ -31,23 +31,31 @@ pd.set_option('display.max_columns', 50)
 pd.set_option('display.max_colwidth', 40)
 pd.set_option('display.float_format', lambda x: f'{x:,.6f}')
 
+SUPPORTED_INTERVALS = ("1m", "3m")
 
-def _infer_pair_and_date(filename: str):
+
+def _interval_to_minutes(interval: str) -> int:
+    """Map an interval string (e.g. '3m') to its duration in minutes."""
+    _MAP = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60}
+    return _MAP.get(interval, 1)
+
+
+def _infer_pair_date_interval(filename: str):
     """
-    Try to extract pair and prepaper date from an eventstudy filename.
+    Try to extract pair, prepaper date, and interval from an eventstudy filename.
 
     Expected pattern:
-        v30_eventstudy_{PAIR}_1m_rsi_sma_cross_gt51_prepaper_{YYYY-MM-DD}.csv
-    Returns (pair, date_str) or (None, None) if not matched.
+        v30_eventstudy_{PAIR}_{INTERVAL}_rsi_sma_cross_gt51_prepaper_{YYYY-MM-DD}.csv
+    Returns (pair, date_str, interval) or (None, None, None) if not matched.
     """
     m = re.search(
-        r'v30_eventstudy_([A-Z0-9]+)_1m_.*?_prepaper_(\d{4}-\d{2}-\d{2})',
+        r'v30_eventstudy_([A-Z0-9]+)_(1m|3m)_.*?_prepaper_(\d{4}-\d{2}-\d{2})',
         Path(filename).name,
         re.IGNORECASE,
     )
     if m:
-        return m.group(1).upper(), m.group(2)
-    return None, None
+        return m.group(1).upper(), m.group(3), m.group(2).lower()
+    return None, None, None
 
 def main():
     """Main CLI entry point."""
@@ -70,11 +78,20 @@ def main():
         help='PrePaper window start date. Inferred from filename when not supplied.'
     )
     parser.add_argument(
+        '--interval',
+        default=None,
+        choices=list(SUPPORTED_INTERVALS),
+        help=(
+            'Kline interval used when generating the events CSV (default: inferred from '
+            'filename, or "1m" if not determinable). Affects timeframe-minutes and output filenames.'
+        ),
+    )
+    parser.add_argument(
         '--output',
         default=None,
         help=(
             'Output CSV path for the full summary. '
-            'Default: forwardtest/eventstudy_list_summary_{PAIR}_prepaper_{DATE}.csv '
+            'Default: forwardtest/eventstudy_list_summary_{PAIR}_{INTERVAL}_prepaper_{DATE}.csv '
             '(falls back to forwardtest/eventstudy_list_summary.csv when pair/date unknown)'
         )
     )
@@ -107,8 +124,11 @@ def main():
     parser.add_argument(
         '--timeframe-minutes',
         type=int,
-        default=1,
-        help='Timeframe in minutes (used to convert bars -> minutes for timing thresholds). Default: 1'
+        default=None,
+        help=(
+            'Timeframe in minutes (used to convert bars -> minutes for timing thresholds). '
+            'Defaults to the value derived from --interval (1m->1, 3m->3).'
+        ),
     )
     parser.add_argument(
         '--timing-bars',
@@ -136,8 +156,8 @@ def main():
         print(f"Error: CSV file not found: {csv_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Resolve pair and prepaper-start (explicit args override filename inference)
-    inferred_pair, inferred_date = _infer_pair_and_date(str(csv_path))
+    # Resolve pair, prepaper-start, and interval (explicit args override filename inference)
+    inferred_pair, inferred_date, inferred_interval = _infer_pair_date_interval(str(csv_path))
     if args.pair and args.pair.strip():
         pair = args.pair.strip().upper()
     elif inferred_pair:
@@ -146,17 +166,26 @@ def main():
         pair = None
     prepaper_date = args.prepaper_start or inferred_date or None
 
-    # Build default output paths
+    # Resolve interval: CLI flag > filename inference > default "1m"
+    interval = args.interval or inferred_interval or "1m"
+
+    # Derive timeframe_minutes from interval unless explicitly overridden
+    if args.timeframe_minutes is not None:
+        timeframe_minutes = args.timeframe_minutes
+    else:
+        timeframe_minutes = _interval_to_minutes(interval)
+
+    # Build default output paths (include interval so 1m and 3m runs don't collide)
     if args.output:
         output_path = Path(args.output)
     elif pair and prepaper_date:
-        output_path = Path("forwardtest") / f"eventstudy_list_summary_{pair}_prepaper_{prepaper_date}.csv"
+        output_path = Path("forwardtest") / f"eventstudy_list_summary_{pair}_{interval}_prepaper_{prepaper_date}.csv"
     else:
         output_path = Path("forwardtest/eventstudy_list_summary.csv")
 
     # Derive top20_view path from output path
     if pair and prepaper_date:
-        top20_path = Path("forwardtest") / f"top20_view_{pair}_prepaper_{prepaper_date}.csv"
+        top20_path = Path("forwardtest") / f"top20_view_{pair}_{interval}_prepaper_{prepaper_date}.csv"
     else:
         top20_path = Path("forwardtest/top20_view.csv")
 
@@ -165,6 +194,7 @@ def main():
         print(f"Pair: {pair}")
     if prepaper_date:
         print(f"PrePaper start: {prepaper_date}")
+    print(f"Interval: {interval} ({timeframe_minutes} min/bar)")
     
     # Load and transform data
     try:
@@ -191,7 +221,7 @@ def main():
             df,
             grid_mode=args.grid,
             vol_rule_as_gate=args.vol_rule_as_gate,
-            timeframe_minutes=args.timeframe_minutes,
+            timeframe_minutes=timeframe_minutes,
             timing_bars=args.timing_bars
         )
         formatted_df = format_summary_table(results_df, grid_mode=args.grid)
