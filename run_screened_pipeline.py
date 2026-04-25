@@ -202,6 +202,8 @@ def main() -> None:
     failed: list[str] = []
     for _, row in top_df.iterrows():
         symbol = str(row["symbol"]).upper()
+        # Stage2 writes best_tf in lowercase ("1m"/"3m"); .lower() guards against
+        # any future formatting variation.
         interval = str(row["best_tf"]).strip().lower()
 
         if interval not in SUPPORTED_INTERVALS:

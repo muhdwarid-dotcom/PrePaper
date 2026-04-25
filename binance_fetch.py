@@ -30,7 +30,7 @@ MAX_LIMIT = 1000          # Binance max records per request
 REQUEST_DELAY_SEC = 0.2   # seconds between paginated requests (avoid rate-limit)
 
 # Bar duration in milliseconds for each supported interval
-_INTERVAL_MS_MAP: dict = {
+_INTERVAL_MS_MAP: dict[str, int] = {
     "1m":  1 * 60_000,
     "3m":  3 * 60_000,
     "5m":  5 * 60_000,

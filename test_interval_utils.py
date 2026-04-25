@@ -8,12 +8,16 @@ import unittest
 
 
 class TestIntervalToMinutes(unittest.TestCase):
-    """Verify the interval -> minutes mapping used across the pipeline."""
+    """Verify the interval -> minutes mapping used across the pipeline.
+
+    Only 1m and 3m are in SUPPORTED_INTERVALS; the default (unknown interval)
+    falls back to 1.
+    """
 
     def _mapping(self, interval: str) -> int:
-        """Shared mapping function (mirrors logic in binance_fetch, eventstudy_analysis,
+        """Shared mapping function (mirrors logic in eventstudy_analysis,
         Derive_k_t_from_PQ_windows, and run_screened_pipeline)."""
-        return {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60}.get(interval, 1)
+        return {"1m": 1, "3m": 3}.get(interval, 1)
 
     def test_1m(self):
         self.assertEqual(self._mapping("1m"), 1)

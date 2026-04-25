@@ -49,7 +49,7 @@ def _infer_pair_date_interval(filename: str):
     Returns (pair, date_str, interval) or (None, None, None) if not matched.
     """
     m = re.search(
-        r'v30_eventstudy_([A-Z0-9]+)_(\d+m)_.*?_prepaper_(\d{4}-\d{2}-\d{2})',
+        r'v30_eventstudy_([A-Z0-9]+)_(1m|3m)_.*?_prepaper_(\d{4}-\d{2}-\d{2})',
         Path(filename).name,
         re.IGNORECASE,
     )
