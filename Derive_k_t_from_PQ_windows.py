@@ -607,7 +607,8 @@ def calculate_exit_params(
     x_min_tail: int = 50,
     policyc_margin: float = 0.10,
     debug: bool = False,
-    enable_x_selection: bool = True
+    enable_x_selection: bool = True,
+    x_bars_min_delay: int = 60
 ) -> Dict[str, Any]:
     """
     Calculate exit parameters from filtered events.
@@ -623,6 +624,8 @@ def calculate_exit_params(
         policyc_margin: Policy C margin (default: 0.10)
         debug: Enable debug output (default: False)
         enable_x_selection: Enable automated x_bars selection (default: True)
+        x_bars_min_delay: Minimum x_bars to treat as active trailing; values below
+            this threshold are clamped to 0 (OFF). Default: 60.
         
     Returns:
         Dictionary with 'k', 't', 'x_bars', 'x_selection_diagnostics', 'events_count', 'events_used'
@@ -679,6 +682,10 @@ def calculate_exit_params(
             time_to_stop_minutes = time_to_stop_values.quantile(kt_quantile)
             x_bars = int(np.ceil(time_to_stop_minutes / timeframe_minutes))
     
+    # x_bars below x_bars_min_delay bars treated as OFF (immediate trailing, effective_x=0).
+    if x_bars is not None and not pd.isna(x_bars) and int(x_bars) < x_bars_min_delay:
+        x_bars = 0
+
     return {
         'k': float(k) if k is not None and not pd.isna(k) else None,
         't': float(t) if t is not None and not pd.isna(t) else None,
@@ -966,7 +973,8 @@ def process_candidates(
     x_min_tail: int = 50,
     policyc_margin: float = 0.10,
     debug: bool = False,
-    enable_x_selection: bool = True
+    enable_x_selection: bool = True,
+    x_bars_min_delay: int = 60
 ) -> List[Dict[str, Any]]:
     """
     Process all candidates and calculate exit parameters.
@@ -983,6 +991,8 @@ def process_candidates(
         policyc_margin: Policy C margin
         debug: Enable debug output
         enable_x_selection: Enable automated x_bars selection
+        x_bars_min_delay: Minimum x_bars to treat as active trailing; values below
+            this threshold are clamped to 0 (OFF). Default: 60.
         
     Returns:
         List of dictionaries with candidate results
@@ -1028,7 +1038,8 @@ def process_candidates(
             x_min_tail=x_min_tail,
             policyc_margin=policyc_margin,
             debug=debug,
-            enable_x_selection=enable_x_selection
+            enable_x_selection=enable_x_selection,
+            x_bars_min_delay=x_bars_min_delay
         )
         
         # Build result
@@ -1191,6 +1202,12 @@ def main():
         '--disable-x-selection',
         action='store_true',
         help='Disable automated x_bars selection, use simple quantile instead'
+    )
+    parser.add_argument(
+        '--x-bars-min-delay',
+        type=int,
+        default=60,
+        help='Minimum x_bars to treat as active trailing delay; values below this are clamped to 0 (OFF). Default: 60'
     )
     
     args = parser.parse_args()
@@ -1357,6 +1374,7 @@ def main():
         print(f"  policyc_margin: {args.policyc_margin}")
         print(f"  timeframe: {args.timeframe_minutes}min")
         print(f"  pnl column: {args.pnl_column}")
+        print(f"  x_bars_min_delay: {args.x_bars_min_delay} (x_bars below this clamped to 0/OFF)")
     
     # Process only finalists
     try:
@@ -1371,7 +1389,8 @@ def main():
             x_min_tail=args.x_min_tail,
             policyc_margin=args.policyc_margin,
             debug=args.debug,
-            enable_x_selection=enable_x_selection
+            enable_x_selection=enable_x_selection,
+            x_bars_min_delay=args.x_bars_min_delay
         )
     except Exception as e:
         print(f"Error processing finalists: {e}", file=sys.stderr)
@@ -1445,6 +1464,7 @@ def main():
                 'timeframe_minutes': args.timeframe_minutes,
                 'pnl_column': args.pnl_column,
                 'x_selection_enabled': enable_x_selection,
+                'x_bars_min_delay': args.x_bars_min_delay,
                 'finalists_per_category': args.finalists_per_category,
                 'finalists_n': args.finalists_n,
                 'min_trades': args.min_trades,
