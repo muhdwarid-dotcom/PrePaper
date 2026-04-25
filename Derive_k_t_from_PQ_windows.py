@@ -1090,11 +1090,21 @@ def main():
         help='PrePaper window start date (default: 2025-12-01). Used to auto-locate input CSVs and name output JSON.'
     )
     parser.add_argument(
+        '--interval',
+        default='1m',
+        choices=['1m', '3m'],
+        help=(
+            'Kline interval used when generating the events CSV (default: 1m). '
+            'Used to build the auto-locate glob pattern and to derive --timeframe-minutes '
+            'when that flag is not explicitly provided.'
+        ),
+    )
+    parser.add_argument(
         '--candidates-csv',
         default=None,
         help=(
             'Path to eventstudy_list_summary CSV. '
-            'Auto-selected from forwardtest/eventstudy_list_summary_{PAIR}_prepaper_{DATE}.csv '
+            'Auto-selected from forwardtest/eventstudy_list_summary_{PAIR}_{INTERVAL}_prepaper_{DATE}.csv '
             'when --pair is supplied and this arg is omitted.'
         )
     )
@@ -1103,7 +1113,7 @@ def main():
         default=None,
         help=(
             'Path to event study CSV file. '
-            'Auto-selected from forwardtest/v30_eventstudy_{PAIR}_1m_*_prepaper_{DATE}.csv '
+            'Auto-selected from forwardtest/v30_eventstudy_{PAIR}_{INTERVAL}_*_prepaper_{DATE}.csv '
             'when --pair is supplied and this arg is omitted.'
         )
     )
@@ -1159,8 +1169,11 @@ def main():
     parser.add_argument(
         '--timeframe-minutes',
         type=int,
-        default=1,
-        help='Timeframe in minutes for x_bars conversion (default: 1)'
+        default=None,
+        help=(
+            'Timeframe in minutes for x_bars conversion. '
+            'Defaults to the value derived from --interval (1m->1, 3m->3).'
+        ),
     )
     parser.add_argument(
         '--finalists-per-category',
@@ -1215,6 +1228,14 @@ def main():
 
     pair = args.pair.upper() if args.pair and args.pair.strip() else None
     prepaper_date = args.prepaper_start
+    interval = args.interval
+
+    # Derive timeframe_minutes from interval unless explicitly overridden
+    _INTERVAL_TO_MINUTES = {"1m": 1, "3m": 3}
+    if args.timeframe_minutes is not None:
+        timeframe_minutes = args.timeframe_minutes
+    else:
+        timeframe_minutes = _INTERVAL_TO_MINUTES.get(interval, 1)
 
     # -----------------------------------------------------------------------
     # Auto-locate input CSVs when --pair is given but paths not explicitly set
@@ -1223,7 +1244,7 @@ def main():
     events_csv_arg = args.events_csv
 
     if pair and not candidates_csv_arg:
-        pattern = f"forwardtest/eventstudy_list_summary_{pair}_prepaper_{prepaper_date}.csv"
+        pattern = f"forwardtest/eventstudy_list_summary_{pair}_{interval}_prepaper_{prepaper_date}.csv"
         found = _auto_find_csv(pattern)
         if found:
             candidates_csv_arg = found
@@ -1236,7 +1257,7 @@ def main():
             sys.exit(1)
 
     if pair and not events_csv_arg:
-        pattern = f"forwardtest/v30_eventstudy_{pair}_1m_*_prepaper_{prepaper_date}.csv"
+        pattern = f"forwardtest/v30_eventstudy_{pair}_{interval}_*_prepaper_{prepaper_date}.csv"
         found = _auto_find_csv(pattern)
         if found:
             events_csv_arg = found
@@ -1372,7 +1393,7 @@ def main():
         print(f"  x fixed: {x_fixed}")
         print(f"  x_min_tail: {args.x_min_tail}")
         print(f"  policyc_margin: {args.policyc_margin}")
-        print(f"  timeframe: {args.timeframe_minutes}min")
+        print(f"  timeframe: {timeframe_minutes}min ({interval})")
         print(f"  pnl column: {args.pnl_column}")
         print(f"  x_bars_min_delay: {args.x_bars_min_delay} (x_bars below this clamped to 0/OFF)")
     
@@ -1384,7 +1405,7 @@ def main():
             kt_quantile=args.kt_quantile,
             x_quantiles=x_quantiles,
             x_fixed=x_fixed,
-            timeframe_minutes=args.timeframe_minutes,
+            timeframe_minutes=timeframe_minutes,
             pnl_column=args.pnl_column,
             x_min_tail=args.x_min_tail,
             policyc_margin=args.policyc_margin,

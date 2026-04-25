@@ -2,19 +2,20 @@
 """
 Funnel Data V30 Event Study — one-pair-at-a-time CLI tool.
 
-Fetches 1-minute OHLCV data from Binance, runs V30 funnel event-study logic,
+Fetches OHLCV data from Binance (1m or 3m), runs V30 funnel event-study logic,
 and writes a window-stamped CSV for the requested pair.
 
 USAGE (3-step pipeline for one pair):
   Step 1 — Generate events CSV:
     python Funnel_Data_Test_V30_EventStudy.py --pair ACTUSDT --prepaper-start 2025-12-01
+    python Funnel_Data_Test_V30_EventStudy.py --pair ACTUSDT --prepaper-start 2025-12-01 --interval 3m
 
   Step 2 — Analyse events, generate candidates CSV:
     python eventstudy_analysis.py forwardtest/v30_eventstudy_ACTUSDT_1m_rsi_sma_cross_gt51_prepaper_2025-12-01.csv \\
-        --pair ACTUSDT --prepaper-start 2025-12-01 --grid
+        --pair ACTUSDT --prepaper-start 2025-12-01 --interval 1m --grid
 
   Step 3 — Derive k/t exit parameters:
-    python Derive_k_t_from_PQ_windows.py --pair ACTUSDT --prepaper-start 2025-12-01
+    python Derive_k_t_from_PQ_windows.py --pair ACTUSDT --prepaper-start 2025-12-01 --interval 1m
 
   Then copy/rename the output JSON to candidate_for_TRADE.json and run:
     python 7_day_trade_window_forward_livefetch_v6+PrePaper.py
@@ -26,7 +27,7 @@ WINDOW DERIVATION (from --prepaper-start P):
   Fetch    : [P - 44 d,   P - 7 d)   (TRAIN + 7-day warmup buffer)
 
 OUTPUT:
-  forwardtest/v30_eventstudy_{PAIR}_1m_rsi_sma_cross_gt51_prepaper_{DATE}.csv
+  forwardtest/v30_eventstudy_{PAIR}_{INTERVAL}_rsi_sma_cross_gt51_prepaper_{DATE}.csv
 """
 
 import argparse
@@ -38,7 +39,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 
-from binance_fetch import fetch_klines_1m
+from binance_fetch import fetch_klines_1m, SUPPORTED_INTERVALS
 
 RSI_LEN = 14
 RSI_SMA_LEN = 14
@@ -79,9 +80,9 @@ def compute_windows(prepaper_start_str: str) -> dict:
     }
 
 
-def prepare_df_from_binance(symbol: str, fetch_start: datetime, fetch_end: datetime) -> pd.DataFrame:
+def prepare_df_from_binance(symbol: str, fetch_start: datetime, fetch_end: datetime, interval: str = "1m") -> pd.DataFrame:
     """Fetch klines from Binance and return a normalised DataFrame ready for indicators."""
-    raw = fetch_klines_1m(symbol, fetch_start, fetch_end)
+    raw = fetch_klines_1m(symbol, fetch_start, fetch_end, interval=interval)
 
     # Rename open_time -> time to match existing indicator/event logic
     df = raw.rename(columns={"open_time": "time"})
@@ -326,7 +327,7 @@ def summarize(out: pd.DataFrame) -> None:
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "V30 Event Study — fetch 1m klines from Binance for one pair and "
+            "V30 Event Study — fetch klines from Binance for one pair and "
             "generate a window-stamped events CSV."
         )
     )
@@ -342,6 +343,12 @@ def main():
         help="PrePaper window start date (00:00 UTC). Default: 2025-12-01",
     )
     parser.add_argument(
+        "--interval",
+        default="1m",
+        choices=list(SUPPORTED_INTERVALS),
+        help="Kline interval to fetch from Binance (default: 1m)",
+    )
+    parser.add_argument(
         "--out-dir",
         default="forwardtest",
         help="Output directory (default: forwardtest)",
@@ -350,6 +357,7 @@ def main():
 
     pair = args.pair.upper()
     prepaper_start_str = args.prepaper_start
+    interval = args.interval
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -360,6 +368,7 @@ def main():
     trade_start, _         = windows["trade"]
 
     print(f"Pair           : {pair}")
+    print(f"Interval       : {interval}")
     print(f"PrePaper start : {prepaper_start_str}")
     print(f"TRAIN window   : {train_start.date()} → {train_end.date()}")
     print(f"TRADE window   : {train_end.date()} → {windows['trade'][1].date()}")
@@ -367,7 +376,7 @@ def main():
 
     # Fetch from Binance
     try:
-        df = prepare_df_from_binance(pair, fetch_start, fetch_end)
+        df = prepare_df_from_binance(pair, fetch_start, fetch_end, interval=interval)
     except Exception as e:
         print(f"Error fetching data from Binance: {e}", file=sys.stderr)
         sys.exit(1)
@@ -395,9 +404,9 @@ def main():
             f"\nEvents in TRAIN window     : {len(out)}"
         )
 
-    # Window-stamped output filename
+    # Window-stamped output filename (interval is dynamic)
     out_filename = (
-        f"v30_eventstudy_{pair}_1m_rsi_sma_cross_gt51"
+        f"v30_eventstudy_{pair}_{interval}_rsi_sma_cross_gt51"
         f"_prepaper_{prepaper_start_str}.csv"
     )
     out_path = out_dir / out_filename

@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-Binance OHLCV 1-minute klines fetcher.
+Binance OHLCV klines fetcher.
 
-Usage:
+Usage (library):
     from binance_fetch import fetch_klines_1m
-    df = fetch_klines_1m("ACTUSDT", start_dt, end_dt)
+    df = fetch_klines_1m("ACTUSDT", start_dt, end_dt, interval="3m")
+
+Usage (CLI):
+    python binance_fetch.py --symbol ACTUSDT --start 2025-11-01 --end 2025-12-01 --interval 3m
 
 Columns returned: open_time, open, high, low, close, volume
   - open_time is UTC-aware datetime
   - numeric columns are float64
+
+Supported intervals: 1m, 3m  (extend _INTERVAL_MS_MAP for others).
 """
 
+import argparse
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,6 +28,27 @@ BINANCE_API_BASE = "https://api.binance.com"
 KLINES_ENDPOINT = "/api/v3/klines"
 MAX_LIMIT = 1000          # Binance max records per request
 REQUEST_DELAY_SEC = 0.2   # seconds between paginated requests (avoid rate-limit)
+
+# Bar duration in milliseconds for each supported interval
+_INTERVAL_MS_MAP: dict = {
+    "1m":  1 * 60_000,
+    "3m":  3 * 60_000,
+    "5m":  5 * 60_000,
+    "15m": 15 * 60_000,
+    "30m": 30 * 60_000,
+    "1h":  60 * 60_000,
+}
+
+SUPPORTED_INTERVALS = ("1m", "3m")
+
+
+def _interval_to_ms(interval: str) -> int:
+    """Return the duration of one bar in milliseconds for *interval*.
+
+    Falls back to 60 000 ms (1 minute) for unknown intervals so that
+    existing callers that pass arbitrary intervals don't break.
+    """
+    return _INTERVAL_MS_MAP.get(interval, 60_000)
 
 
 def fetch_klines_1m(
@@ -84,7 +111,7 @@ def fetch_klines_1m(
 
         # Advance to the bar *after* the last returned bar
         last_open_ms = rows[-1][0]
-        current_ms = last_open_ms + 60_000  # next 1-min bar
+        current_ms = last_open_ms + _interval_to_ms(interval)
 
         if len(rows) < MAX_LIMIT:
             break  # no more data in range
@@ -121,3 +148,25 @@ def fetch_klines_1m(
 
     print(f"Fetched {len(df)} bars for {symbol}")
     return df
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Fetch Binance OHLCV klines and print a CSV summary."
+    )
+    parser.add_argument("--symbol", required=True, help="Binance trading pair, e.g. ACTUSDT")
+    parser.add_argument("--start", required=True, metavar="YYYY-MM-DD", help="Start date (UTC, inclusive)")
+    parser.add_argument("--end", required=True, metavar="YYYY-MM-DD", help="End date (UTC, exclusive)")
+    parser.add_argument(
+        "--interval",
+        default="1m",
+        choices=list(SUPPORTED_INTERVALS),
+        help="Kline interval (default: 1m)",
+    )
+    cli_args = parser.parse_args()
+
+    start_dt = datetime.strptime(cli_args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(cli_args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    result_df = fetch_klines_1m(cli_args.symbol, start_dt, end_dt, interval=cli_args.interval)
+    print(result_df.to_string())
